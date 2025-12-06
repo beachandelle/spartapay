@@ -1,0 +1,871 @@
+// server.js
+// SpartaPay server with Supabase private-bucket support (signed URLs)
+// - Serves static frontend from ./public
+// - POST /session: verifies Firebase ID token and upserts users/{uid} in Firestore
+// - POST /api/payments: accepts multipart/form-data (proof file), uploads to Supabase (or local fallback), stores proofObjectPath and metadata
+// - GET /api/payments: returns payments, injecting fresh signed URLs for proofFile when available
+// - GET /api/my-payments: returns authenticated user's payments, injecting fresh signed URLs
+// - GET /api/payments/:id/proof-url: returns a signed URL for a single payment (auth + authorization)
+// - POST /api/payments/:id/approve, /unapprove and /reject
+// - NEW: GET /api/events, POST /api/events (multipart support), PUT /api/events/:id (multipart support added), DELETE /api/events/:id
+// - NEW: GET /api/orgs, GET /api/orgs/:id, POST /api/orgs, PUT /api/orgs/:id, DELETE /api/orgs/:id
+//
+// Environment variables (in .env):
+// PORT, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_BUCKET, FIREBASE_SERVICE_ACCOUNT
+//
+// Notes:
+// - Keep SUPABASE_BUCKET = the exact bucket name (case-sensitive), e.g. "spartapay"
+// - This server will generate signed URLs for private buckets (default TTL 3600s).
+// - Store only proofObjectPath in DB; signed URLs are created on demand.
+
+const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { v4: uuidv4 } = require('uuid');
+const cors = require('cors');
+require('dotenv').config();
+
+const PORT = process.env.PORT || 3001;
+const app = express();
+
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Serve static frontend
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Local uploads fallback folder
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+
+// Local DB fallback file (now includes payments, events AND organizations)
+const DB_FILE = path.join(__dirname, 'data.json');
+if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ payments: [], events: [], organizations: [] }, null, 2));
+
+function readDB() {
+  try {
+    const db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+    // ensure required keys exist for backward compatibility
+    if (!db.payments) db.payments = [];
+    if (!db.events) db.events = [];
+    if (!db.organizations) db.organizations = [];
+    return db;
+  } catch (e) {
+    console.warn('readDB error:', e);
+    return { payments: [], events: [], organizations: [] };
+  }
+}
+function writeDB(db) {
+  // ensure arrays exist
+  if (!db.payments) db.payments = [];
+  if (!db.events) db.events = [];
+  if (!db.organizations) db.organizations = [];
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+}
+
+// Multer memory storage for uploads
+const storage = multer.memoryStorage();
+const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB
+
+// Supabase init (server-side service role)
+let supabase = null;
+let supabaseBucket = process.env.SUPABASE_BUCKET || 'public';
+if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  try {
+    const { createClient } = require('@supabase/supabase-js');
+    supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+    console.log('Supabase client initialized. Bucket:', supabaseBucket);
+  } catch (err) {
+    console.warn('Failed to init Supabase client:', err);
+    supabase = null;
+  }
+} else {
+  console.log('SUPABASE not configured; uploads will be stored on local disk (/uploads)');
+}
+
+// Firebase Admin (optional) — used for token verification and Firestore
+let admin = null;
+let firestore = null;
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    admin = require('firebase-admin');
+    const svc = process.env.FIREBASE_SERVICE_ACCOUNT;
+    let serviceAccountObj;
+    if (fs.existsSync(svc)) {
+      serviceAccountObj = JSON.parse(fs.readFileSync(svc, 'utf8'));
+    } else {
+      serviceAccountObj = JSON.parse(svc);
+    }
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccountObj)
+    });
+    firestore = admin.firestore();
+    console.log('firebase-admin initialized for token verification and Firestore.');
+  } catch (err) {
+    console.warn('Failed to initialize firebase-admin:', err && err.message ? err.message : err);
+    admin = null;
+    firestore = null;
+  }
+} else {
+  console.warn('No FIREBASE_SERVICE_ACCOUNT provided — token verification and Firestore disabled.');
+}
+
+// Register POST /session route (verifies ID token and upserts user into Firestore)
+// This expects a routes/session.js that exports a function (admin, firestore) => handler
+try {
+  const sessionRoute = require('./routes/session')(admin, firestore);
+  app.post('/session', sessionRoute);
+  console.log('POST /session route registered');
+} catch (e) {
+  console.warn('Failed to register /session route:', e);
+}
+
+// Middleware: verify Firebase ID token (if admin configured)
+async function verifyFirebaseToken(req, res, next) {
+  if (!admin) return next(); // skip verification if not configured
+  try {
+    const authHeader = req.headers.authorization || req.headers.Authorization || '';
+    const match = String(authHeader).match(/Bearer (.+)/);
+    if (!match) return res.status(401).json({ error: 'Missing Authorization Bearer token' });
+    const idToken = match[1];
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    req.firebaseUser = decoded; // { uid, email, name, ... }
+    return next();
+  } catch (err) {
+    console.error('Token verify error:', err && err.message ? err.message : err);
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+// Helper: create signed URL (preferred for private buckets), fallback to public URL
+async function makeFileUrl(pathOnBucket, { expires = 60 * 60 } = {}) {
+  if (!supabase) return null;
+  try {
+    // Try signed URL first (for private buckets)
+    try {
+      const { data: signedData, error: signedError } = await supabase.storage.from(supabaseBucket).createSignedUrl(pathOnBucket, expires);
+      if (!signedError && signedData && (signedData.signedUrl || signedData.signedURL)) {
+        return signedData.signedUrl || signedData.signedURL;
+      }
+      // signedError may indicate object missing or permission issues
+    } catch (err) {
+      // continue to try public URL
+      console.warn('createSignedUrl call failed:', err && err.message ? err.message : err);
+    }
+
+    // Fallback to public URL (works if bucket is public)
+    try {
+      const { data } = supabase.storage.from(supabaseBucket).getPublicUrl(pathOnBucket);
+      if (data && (data.publicUrl || data.publicURL)) return data.publicUrl || data.publicURL;
+    } catch (err) {
+      // ignore
+    }
+    return null;
+  } catch (err) {
+    console.warn('makeFileUrl error:', err && err.message ? err.message : err);
+    return null;
+  }
+}
+
+// Helper: canonicalize org name for comparisons
+function canonicalOrgName(name) {
+  try {
+    return String(name || '').trim().toLowerCase();
+  } catch (e) {
+    return String(name || '').trim();
+  }
+}
+
+// Helper: upsert organization by name (returns the org object)
+async function upsertOrganizationByName(orgName, { displayName = null, logoUrl = null, contactEmail = null, metadata = null } = {}) {
+  if (!orgName) return null;
+  const canon = canonicalOrgName(orgName);
+  const db = readDB();
+  db.organizations = db.organizations || [];
+
+  // Find existing org by canonical name
+  let existing = db.organizations.find(o => (o.canonicalName || canonicalOrgName(o.name)) === canon);
+  if (existing) {
+    // Optionally merge displayName/logo/contact if provided and missing
+    let changed = false;
+    if (displayName && !existing.displayName) { existing.displayName = displayName; changed = true; }
+    if (logoUrl && !existing.logoUrl) { existing.logoUrl = logoUrl; changed = true; }
+    if (contactEmail && !existing.contactEmail) { existing.contactEmail = contactEmail; changed = true; }
+    if (metadata && !existing.metadata) { existing.metadata = metadata; changed = true; }
+    if (changed) {
+      existing.updatedAt = new Date().toISOString();
+      writeDB(db);
+      if (firestore) {
+        firestore.collection('organizations').doc(existing.id).set(existing, { merge: true }).catch(err => {
+          console.warn('Firestore update on organization failed:', err);
+        });
+      }
+    }
+    return existing;
+  }
+
+  // Create new org
+  const org = {
+    id: uuidv4(),
+    name: String(orgName),
+    canonicalName: canon,
+    displayName: displayName || String(orgName),
+    logoUrl: logoUrl || null,
+    contactEmail: contactEmail || null,
+    metadata: metadata || {},
+    createdAt: new Date().toISOString()
+  };
+
+  db.organizations.unshift(org);
+  writeDB(db);
+
+  if (firestore) {
+    try {
+      await firestore.collection('organizations').doc(org.id).set(org);
+    } catch (err) {
+      console.warn('Failed to persist organization to Firestore:', err && err.message ? err.message : err);
+    }
+  }
+
+  return org;
+}
+
+// ----------------------
+// Organizations endpoints (NEW)
+// - GET /api/orgs
+// - GET /api/orgs/:id
+// - POST /api/orgs
+// - PUT /api/orgs/:id
+// - DELETE /api/orgs/:id
+// Organizations are stored in local data.json and in Firestore collection 'organizations' when configured.
+// These endpoints are intentionally public for now (no verifyFirebaseToken). Add verifyFirebaseToken if you want to restrict changes.
+// ----------------------
+
+// GET /api/orgs - return list of organizations
+app.get('/api/orgs', async (req, res) => {
+  try {
+    const db = readDB();
+    let orgs = (db.organizations || []).map(o => ({ ...o }));
+    // If no explicit organizations exist, derive from events (helpful fallback)
+    if ((!orgs || orgs.length === 0) && Array.isArray(db.events) && db.events.length > 0) {
+      const names = Array.from(new Set(db.events.map(e => e.org).filter(Boolean)));
+      orgs = names.map(n => ({ id: n, name: n, displayName: n, canonicalName: canonicalOrgName(n), createdAt: null }));
+    }
+    return res.json(orgs);
+  } catch (err) {
+    console.error('GET /api/orgs error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/orgs/:id - get single org
+app.get('/api/orgs/:id', async (req, res) => {
+  try {
+    const db = readDB();
+    const org = (db.organizations || []).find(o => o.id === req.params.id || o.name === req.params.id);
+    if (!org) return res.status(404).json({ error: 'not found' });
+    return res.json(org);
+  } catch (err) {
+    console.error('GET /api/orgs/:id error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/orgs - create organization (idempotent/upsert by canonical name)
+app.post('/api/orgs', async (req, res) => {
+  try {
+    const { name, displayName, logoUrl, contactEmail, metadata } = req.body || {};
+    if (!name) return res.status(400).json({ error: 'name is required' });
+
+    const org = await upsertOrganizationByName(name, { displayName, logoUrl, contactEmail, metadata });
+    return res.json(org);
+  } catch (err) {
+    console.error('POST /api/orgs error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/orgs/:id - update organization (partial)
+app.put('/api/orgs/:id', async (req, res) => {
+  try {
+    const db = readDB();
+    db.organizations = db.organizations || [];
+    const idx = db.organizations.findIndex(o => o.id === req.params.id || o.name === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'not found' });
+
+    const update = req.body || {};
+    const allowed = ['name', 'displayName', 'logoUrl', 'contactEmail', 'metadata'];
+    allowed.forEach(k => {
+      if (typeof update[k] !== 'undefined') db.organizations[idx][k] = update[k];
+    });
+    // Refresh canonicalName if name changed
+    if (update.name) db.organizations[idx].canonicalName = canonicalOrgName(update.name);
+    db.organizations[idx].updatedAt = new Date().toISOString();
+
+    writeDB(db);
+
+    if (firestore) {
+      firestore.collection('organizations').doc(db.organizations[idx].id).set(db.organizations[idx], { merge: true }).catch(err => {
+        console.warn('Firestore update on organization failed:', err);
+      });
+    }
+
+    return res.json(db.organizations[idx]);
+  } catch (err) {
+    console.error('PUT /api/orgs/:id error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE /api/orgs/:id - delete organization
+app.delete('/api/orgs/:id', async (req, res) => {
+  try {
+    const db = readDB();
+    db.organizations = db.organizations || [];
+    const idx = db.organizations.findIndex(o => o.id === req.params.id || o.name === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'not found' });
+
+    const removed = db.organizations.splice(idx, 1)[0];
+    writeDB(db);
+
+    if (firestore) {
+      firestore.collection('organizations').doc(removed.id).delete().catch(err => {
+        console.warn('Firestore delete organization failed:', err);
+      });
+    }
+
+    return res.json({ ok: true, id: removed.id });
+  } catch (err) {
+    console.error('DELETE /api/orgs/:id error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ----------------------
+// Events endpoints (NEW)
+// - GET /api/events (supports optional ?org=ORG_NAME filter)
+// - POST /api/events (multipart support)
+// - PUT /api/events/:id (multipart support added)
+// - DELETE /api/events/:id
+// These use the local data.json fallback (db.events) and also persist to Firestore if configured.
+// ----------------------
+
+// GET /api/events - list all events (server-authoritative); supports optional org filter
+app.get('/api/events', async (req, res) => {
+  try {
+    const db = readDB();
+    let events = (db.events || []).map(e => ({ ...e }));
+    const orgFilter = req.query.org ? String(req.query.org) : null;
+    if (orgFilter) {
+      events = events.filter(ev => ev && ev.org === orgFilter);
+    }
+    // return a shallow clone to avoid accidental mutation
+    res.json(events);
+  } catch (err) {
+    console.error('GET /api/events error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/events/:id - single event
+app.get('/api/events/:id', async (req, res) => {
+  try {
+    const db = readDB();
+    const ev = (db.events || []).find(x => x.id === req.params.id);
+    if (!ev) return res.status(404).json({ error: 'not found' });
+    res.json(ev);
+  } catch (err) {
+    console.error('GET /api/events/:id error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/events - create event (accept JSON body OR multipart/form-data with receiverQR file)
+app.post('/api/events', upload.single('receiverQR'), async (req, res) => {
+  try {
+    // Accept both JSON and multipart/form-data
+    // If multipart, form fields come in req.body as strings; receiver may be passed as JSON string
+    let { name, fee, deadline, org } = req.body || {};
+    let receiver = req.body && req.body.receiver ? req.body.receiver : null;
+
+    // If receiver is a JSON string (sent by the client), parse it
+    if (receiver && typeof receiver === 'string') {
+      try { receiver = JSON.parse(receiver); } catch (e) { /* leave as string fallback */ }
+    }
+
+    // Validate required fields
+    if (!name || !org) {
+      return res.status(400).json({ error: 'name and org are required' });
+    }
+
+    // Normalize values
+    name = String(name);
+    fee = typeof fee !== 'undefined' ? Number(fee) : 0;
+    deadline = deadline || null;
+    org = String(org);
+
+    // Build initial event object
+    const newEvent = {
+      id: uuidv4(),
+      name,
+      fee,
+      deadline,
+      status: 'Open',
+      org,
+      receiver: receiver && typeof receiver === 'object' ? Object.assign({}, receiver) : (receiver || {}),
+      createdAt: new Date().toISOString()
+    };
+
+    // If a file was uploaded under 'receiverQR', upload to Supabase (or save locally)
+    if (req.file) {
+      try {
+        const ext = path.extname(req.file.originalname) || '';
+        const objectPath = `events/receiver_qr/${newEvent.id}${ext || '.png'}`;
+
+        if (supabase) {
+          const { data, error } = await supabase.storage.from(supabaseBucket).upload(objectPath, req.file.buffer, { contentType: req.file.mimetype, upsert: false });
+          if (error) {
+            console.warn('Supabase upload error for event QR:', error);
+            // fallback to saving locally below
+          } else {
+            const storedPath = data && (data.path || data.Key || data.name) ? (data.path || data.Key || data.name) : objectPath;
+            // store the object path in receiver.qrObjectPath so clients can request signed URLs
+            newEvent.receiver = Object.assign({}, newEvent.receiver || {}, { qrObjectPath: storedPath });
+            // Optionally add a temporary signed url for immediate client display (non-persistent)
+            try {
+              const signed = await makeFileUrl(storedPath);
+              if (signed) newEvent.receiver.qr = signed;
+            } catch (e) { /* ignore signed url failure */ }
+          }
+        } else {
+          // Supabase not configured: write file to local uploads/ and set local path
+          const filename = `${newEvent.id}${ext || '.png'}`;
+          const dest = path.join(UPLOADS_DIR, filename);
+          fs.writeFileSync(dest, req.file.buffer);
+          newEvent.receiver = Object.assign({}, newEvent.receiver || {}, { qr: `${req.protocol}://${req.get('host')}/uploads/${filename}`, qrObjectIsLocal: true, qrObjectPath: filename });
+        }
+      } catch (err) {
+        console.warn('Error handling uploaded receiverQR file:', err && err.message ? err.message : err);
+      }
+    } else {
+      // No file uploaded; if client sent a data URL in receiver.qr (base64), leave it as-is for now.
+      // We'll keep the data URL in receiver.qr (existing behavior) unless you later want to migrate them.
+    }
+
+    // Persist to local DB
+    const db = readDB();
+    db.events = db.events || [];
+    db.events.unshift(newEvent);
+    writeDB(db);
+
+    // Auto-create/upsert organization record for this event's org (recommended default)
+    try {
+      await upsertOrganizationByName(org, { displayName: org });
+    } catch (err) {
+      console.warn('Failed to upsert organization on event create:', err && err.message ? err.message : err);
+    }
+
+    // Persist to Firestore (non-blocking)
+    if (firestore) {
+      try {
+        await firestore.collection('events').doc(newEvent.id).set(newEvent);
+      } catch (err) {
+        console.warn('Failed to persist event to Firestore:', err && err.message ? err.message : err);
+      }
+    }
+
+    // Return created event to client
+    return res.json(newEvent);
+  } catch (err) {
+    console.error('POST /api/events error:', err && err.message ? err.message : err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// PUT /api/events/:id - update event (partial) - now supports multipart (receiverQR) as well as JSON
+app.put('/api/events/:id', upload.single('receiverQR'), async (req, res) => {
+  try {
+    const db = readDB();
+    db.events = db.events || [];
+    const idx = db.events.findIndex(e => e.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'not found' });
+
+    // req.body may be JSON (Content-Type: application/json) or strings (multipart)
+    let update = req.body || {};
+
+    // If receiver is a JSON string (from multipart), parse it
+    if (update && update.receiver && typeof update.receiver === 'string') {
+      try { update.receiver = JSON.parse(update.receiver); } catch (e) { /* leave as string if parse fails */ }
+    }
+
+    // allow updating name, fee, deadline, status, receiver, org
+    const allowed = ['name', 'fee', 'deadline', 'status', 'receiver', 'org'];
+    allowed.forEach(k => {
+      if (typeof update[k] !== 'undefined') {
+        // For numeric fields like fee, coerce appropriately if needed
+        if (k === 'fee') {
+          db.events[idx][k] = Number(update[k]);
+        } else {
+          db.events[idx][k] = update[k];
+        }
+      }
+    });
+
+    // If a file was uploaded under 'receiverQR', upload/replace to Supabase (or save locally)
+    if (req.file) {
+      try {
+        const ext = path.extname(req.file.originalname) || '';
+        const objectPath = `events/receiver_qr/${req.params.id}${ext || '.png'}`; // use event id to replace
+
+        if (supabase) {
+          // Use upsert:true to allow replacing existing object
+          const { data, error } = await supabase.storage.from(supabaseBucket).upload(objectPath, req.file.buffer, { contentType: req.file.mimetype, upsert: true });
+          if (error) {
+            console.warn('Supabase upload error for event QR (update):', error);
+          } else {
+            const storedPath = data && (data.path || data.Key || data.name) ? (data.path || data.Key || data.name) : objectPath;
+            db.events[idx].receiver = Object.assign({}, db.events[idx].receiver || {}, { qrObjectPath: storedPath });
+            // Optionally add a temporary signed url for immediate client display (non-persistent)
+            try {
+              const signed = await makeFileUrl(storedPath);
+              if (signed) db.events[idx].receiver.qr = signed;
+            } catch (e) { /* ignore signed url failure */ }
+          }
+        } else {
+          // Supabase not configured: write file to local uploads/ and set local path
+          const filename = `${req.params.id}${ext || '.png'}`;
+          const dest = path.join(UPLOADS_DIR, filename);
+          fs.writeFileSync(dest, req.file.buffer);
+          db.events[idx].receiver = Object.assign({}, db.events[idx].receiver || {}, { qr: `${req.protocol}://${req.get('host')}/uploads/${filename}`, qrObjectIsLocal: true, qrObjectPath: filename });
+        }
+      } catch (err) {
+        console.warn('Error handling uploaded receiverQR file on update:', err && err.message ? err.message : err);
+      }
+    }
+
+    db.events[idx].updatedAt = new Date().toISOString();
+
+    // If org changed, ensure organization exists
+    try {
+      if (update.org) {
+        await upsertOrganizationByName(update.org, { displayName: update.org });
+      }
+    } catch (e) {
+      console.warn('Failed to upsert organization on event update:', e);
+    }
+
+    writeDB(db);
+
+    if (firestore) {
+      firestore.collection('events').doc(db.events[idx].id).set(db.events[idx], { merge: true }).catch(err => {
+        console.warn('Firestore update on event failed:', err);
+      });
+    }
+
+    return res.json(db.events[idx]);
+  } catch (err) {
+    console.error('PUT /api/events/:id error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// DELETE /api/events/:id - delete event
+app.delete('/api/events/:id', async (req, res) => {
+  try {
+    const db = readDB();
+    db.events = db.events || [];
+    const idx = db.events.findIndex(e => e.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: 'not found' });
+
+    const removed = db.events.splice(idx, 1)[0];
+    writeDB(db);
+
+    if (firestore) {
+      firestore.collection('events').doc(removed.id).delete().catch(err => {
+        console.warn('Firestore delete event failed:', err);
+      });
+    }
+
+    return res.json({ ok: true, id: removed.id });
+  } catch (err) {
+    console.error('DELETE /api/events/:id error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ----------------------
+// Payments endpoints (existing)
+// ----------------------
+
+// GET /api/payments - list all payments (inject signed URLs when possible)
+app.get('/api/payments', async (req, res) => {
+  try {
+    const db = readDB();
+    const payments = db.payments.map(p => ({ ...p })); // shallow clone
+
+    if (supabase) {
+      await Promise.all(payments.map(async (p) => {
+        if (p.proofObjectPath) {
+          try {
+            const url = await makeFileUrl(p.proofObjectPath);
+            if (url) p.proofFile = url;
+          } catch (err) {
+            // keep existing p.proofFile if any (local fallback)
+            console.warn('Failed to create signed URL for', p.proofObjectPath, err && err.message ? err.message : err);
+          }
+        }
+      }));
+    }
+    res.json(payments);
+  } catch (err) {
+    console.error('GET /api/payments error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/my-payments - payments for authenticated user (returns signed URLs)
+app.get('/api/my-payments', verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.firebaseUser && req.firebaseUser.uid;
+    const email = req.firebaseUser && req.firebaseUser.email;
+    const db = readDB();
+    let list = db.payments.filter(p => (p.submittedByUid && p.submittedByUid === uid) || (p.submittedByEmail && p.submittedByEmail === email));
+
+    if (supabase) {
+      await Promise.all(list.map(async (p) => {
+        if (p.proofObjectPath) {
+          try {
+            const url = await makeFileUrl(p.proofObjectPath);
+            if (url) p.proofFile = url;
+          } catch (err) {
+            console.warn('Failed to create signed URL for', p.proofObjectPath, err && err.message ? err.message : err);
+          }
+        }
+      }));
+    }
+    return res.json(list);
+  } catch (err) {
+    console.error('GET /api/my-payments error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/payments - create a payment with optional file 'proof'
+app.post('/api/payments', verifyFirebaseToken, upload.single('proof'), async (req, res) => {
+  try {
+    const { name, amount, purpose } = req.body;
+    if (!name || !amount) {
+      return res.status(400).json({ error: 'name and amount are required' });
+    }
+
+    // Optional client fields
+    const reference = req.body.reference || req.body.referenceNumber || req.body.ref || null;
+    const org = req.body.org || null;
+    const event = req.body.event || null;
+    const studentNameFromClient = req.body.studentName || req.body.student_name || null;
+    const studentYear = req.body.studentYear || req.body.student_year || null;
+    const studentCollege = req.body.studentCollege || req.body.student_college || null;
+    const studentDepartment = req.body.studentDepartment || req.body.student_department || null;
+    const studentProgram = req.body.studentProgram || req.body.student_program || null;
+
+    // Upload file to Supabase if configured
+    let proofUrl = null; // url we may include in this response (signed/public), may expire
+    let storedPath = null; // object path stored permanently in DB
+
+    if (req.file && supabase) {
+      try {
+        const uid = (req.firebaseUser && req.firebaseUser.uid) ? req.firebaseUser.uid : 'anon';
+        const ext = path.extname(req.file.originalname) || '';
+        const objectPath = `proofs/${uid}/${Date.now()}-${uuidv4()}${ext}`;
+
+        const { data, error } = await supabase.storage.from(supabaseBucket).upload(objectPath, req.file.buffer, { contentType: req.file.mimetype, upsert: false });
+        if (error) {
+          console.warn('Supabase upload error:', error);
+        } else {
+          // storedPath is object path; Supabase may return data with path/name
+          storedPath = data && (data.path || data.Key || data.name) ? (data.path || data.Key || data.name) : objectPath;
+          // generate a signed URL for immediate response (it will expire) - useful so client can show image immediately
+          const url = await makeFileUrl(storedPath);
+          if (url) proofUrl = url;
+        }
+      } catch (err) {
+        console.warn('Supabase upload exception:', err && err.message ? err.message : err);
+      }
+    }
+
+    // Fallback: save to local disk and return local URL
+    if (!proofUrl && req.file) {
+      const filename = `${uuidv4()}${path.extname(req.file.originalname) || ''}`;
+      const dest = path.join(UPLOADS_DIR, filename);
+      fs.writeFileSync(dest, req.file.buffer);
+      storedPath = filename;
+      proofUrl = `${req.protocol}://${req.get('host')}/uploads/${filename}`;
+    }
+
+    // Resolve student name/email from token if client didn't provide
+    let resolvedStudentName = studentNameFromClient && studentNameFromClient.trim() ? studentNameFromClient.trim() : null;
+    let submittedEmail = req.body.submittedByEmail || null;
+    if ((!resolvedStudentName || resolvedStudentName === '') && req.firebaseUser) {
+      resolvedStudentName = req.firebaseUser.name || req.firebaseUser.full_name || req.firebaseUser.displayName || null;
+    }
+    if (!submittedEmail && req.firebaseUser && req.firebaseUser.email) {
+      submittedEmail = req.firebaseUser.email;
+    }
+
+    // Build payment object and persist
+    const db = readDB();
+    const payment = {
+      id: uuidv4(),
+      name,
+      amount: parseFloat(amount),
+      purpose: purpose || null,
+      org: org || null,
+      event: event || null,
+      reference: reference || null,
+      // proofObjectPath stores either Supabase object path (for cloud) or local filename (if fallback)
+      proofObjectPath: storedPath || null,
+      // proofFile is a usable URL for immediate display (may be signed and expire)
+      proofFile: proofUrl || null,
+      proofObjectIsLocal: storedPath && !supabase ? true : false,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      notes: req.body.notes || '',
+      studentName: resolvedStudentName || null,
+      studentYear: studentYear || null,
+      studentCollege: studentCollege || null,
+      studentDepartment: studentDepartment || null,
+      studentProgram: studentProgram || null,
+      submittedByUid: req.firebaseUser ? req.firebaseUser.uid : null,
+      submittedByEmail: submittedEmail || null
+    };
+
+    db.payments.unshift(payment);
+    writeDB(db);
+
+    // Persist to Firestore (non-blocking)
+    if (firestore) {
+      try {
+        await firestore.collection('payments').doc(payment.id).set(payment);
+        if (payment.submittedByUid) {
+          await firestore.collection('users').doc(payment.submittedByUid).collection('payments').doc(payment.id).set(payment);
+        }
+      } catch (err) {
+        console.warn('Failed to persist payment to Firestore:', err && err.message ? err.message : err);
+      }
+    }
+
+    // Return the created payment (includes proofFile for immediate viewing)
+    return res.json(payment);
+  } catch (err) {
+    console.error('Error POST /api/payments:', err && err.message ? err.message : err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/payments/:id/proof-url - return a fresh signed URL for a given payment (auth + authorization)
+app.get('/api/payments/:id/proof-url', verifyFirebaseToken, async (req, res) => {
+  try {
+    const db = readDB();
+    const payment = db.payments.find(p => p.id === req.params.id);
+    if (!payment) return res.status(404).json({ error: 'not found' });
+    if (!payment.proofObjectPath) return res.status(404).json({ error: 'no proof object path' });
+
+    // Authorization: owner or officer
+    const uid = req.firebaseUser && req.firebaseUser.uid;
+    const email = req.firebaseUser && req.firebaseUser.email;
+    const isOwner = (payment.submittedByUid && payment.submittedByUid === uid) || (payment.submittedByEmail && payment.submittedByEmail === email);
+    // Optionally determine officer role from Firestore or token claim
+    const isOfficer = req.firebaseUser && req.firebaseUser.role === 'officer'; // adjust as needed
+
+    if (!isOwner && !isOfficer) return res.status(403).json({ error: 'forbidden' });
+
+    // If storedPath indicates local file (fallback), return local URL
+    if (payment.proofObjectIsLocal) {
+      const url = `${req.protocol}://${req.get('host')}/uploads/${payment.proofObjectPath}`;
+      return res.json({ url, expiresIn: 0, local: true });
+    }
+
+    if (!supabase) return res.status(500).json({ error: 'storage not configured' });
+
+    const ttl = 60 * 60; // 1 hour
+    const { data, error } = await supabase.storage.from(supabaseBucket).createSignedUrl(payment.proofObjectPath, ttl);
+    if (error || !data) {
+      console.warn('createSignedUrl failed for', payment.proofObjectPath, error);
+      return res.status(500).json({ error: 'could not create signed url' });
+    }
+    return res.json({ url: data.signedUrl || data.signedURL, expiresIn: ttl, local: false });
+  } catch (err) {
+    console.error('GET /api/payments/:id/proof-url error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// New: Unapprove endpoint - change status back to pending and clear approval metadata
+// Matches the storage/update pattern used by approve/reject endpoints (persist to data.json and Firestore)
+app.post('/api/payments/:id/unapprove', async (req, res) => {
+  try {
+    const db = readDB();
+    const payment = db.payments.find(p => p.id === req.params.id);
+    if (!payment) return res.status(404).json({ error: 'not found' });
+
+    payment.status = 'pending';
+    // remove approval-related fields
+    delete payment.approvedAt;
+    delete payment.verifiedBy;
+    delete payment.rejectedAt;
+
+    writeDB(db);
+
+    if (firestore) {
+      firestore.collection('payments').doc(payment.id).set(payment, { merge: true }).catch(err => {
+        console.warn('Firestore update on unapprove failed:', err);
+      });
+      if (payment.submittedByUid) {
+        firestore.collection('users').doc(payment.submittedByUid).collection('payments').doc(payment.id).set(payment, { merge: true }).catch(err => {
+          console.warn('Firestore per-user update on unapprove failed:', err);
+        });
+      }
+    }
+
+    return res.json(payment);
+  } catch (err) {
+    console.error('Error /unapprove:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Approve endpoint
+app.post('/api/payments/:id/approve', async (req, res) => {
+  try {
+    const db = readDB();
+    const payment = db.payments.find(p => p.id === req.params.id);
+    if (!payment) return res.status(404).json({ error: 'not found' });
+    payment.status = 'approved';
+    payment.approvedAt = new Date().toISOString();
+    writeDB(db);
+    if (firestore) {
+      firestore.collection('payments').doc(payment.id).set(payment, { merge: true }).catch(err => {
+        console.warn('Firestore update on approve failed:', err);
+      });
+      if (payment.submittedByUid) {
+        firestore.collection('users').doc(payment.submittedByUid).collection('payments').doc(payment.id).set(payment, { merge: true }).catch(err => {
+          console.warn('Firestore per-user update on approve failed:', err);
+        });
+      }
+    }
+    return res.json(payment);
+  } catch (err) {
+    console.error('Error /approve:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Serve local uploads publicly
+app.use('/uploads', express.static(UPLOADS_DIR));
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`🚀 SpartaPay running on http://localhost:${PORT}`);
+});

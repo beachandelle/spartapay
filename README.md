@@ -1,14 +1,19 @@
-# spartapay
+// ------------------------------
+// FILE: README.md
+// ------------------------------
 
-This repository contains the SpartaPay Express server and static frontend (public/).  
-Follow the steps below to prepare the repo, run locally, and deploy (Render recommended).
+# SpartaPay — Starter (Express + Vanilla JS)
 
-## What to commit
-- server.js, public/, officer-dashboard.* and student-dashboard.* files, frontend assets
-- package.json, README.md, .gitignore, .env.example
+Minimal full-stack starter you can run locally. Includes:
+- Express backend (server.js) serving static frontend
+- Simple JSON file datastore (data.json)
+- File uploads for proof of payment (stored in /uploads)
+- Simple endpoints: create/list/approve payments
 
-Do NOT commit:
-- `.env` or any file with secrets
-- `uploads/` (proof images)
-- `data.json` (production/local DB file)
-- `node_modules/`
+## Run locally
+1. `npm install`
+2. `npm start`
+3. Open http://localhost:3000
+
+(See `server.js` for details)
+
