@@ -8,7 +8,8 @@
 // - NEW: reacts to a small localStorage signal ('orgsLastUpdated') so open tabs refresh org list quicker.
 
 document.addEventListener("DOMContentLoaded", () => {
-  const SERVER_BASE = window.SERVER_BASE || "http://localhost:3001";
+  // Use localhost only for local development; on deployed site use same-origin (empty string -> '/api/...')
+  const SERVER_BASE = window.SERVER_BASE || ((window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? 'http://localhost:3001' : '');
 
   // ----------------------
   // Element refs
@@ -109,10 +110,25 @@ document.addEventListener("DOMContentLoaded", () => {
   let _isSubmittingPayment = false; // submission guard
 
   // ----------------------
+  // Small auth helper for client requests
+  // ----------------------
+  function getIdToken() {
+    try { return localStorage.getItem('idToken') || null; } catch (e) { return null; }
+  }
+
+  async function fetchWithAuth(url, options = {}) {
+    const headers = Object.assign({}, options.headers || {});
+    try {
+      const idToken = getIdToken();
+      if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+    } catch (e) { /* ignore */ }
+    return fetch(url, Object.assign({}, options, { headers }));
+  }
+
+  // ----------------------
   // Server helpers
   // ----------------------
   async function submitPaymentToServer({ org, event, amount, date, reference, file, studentMeta }) {
-    const idToken = localStorage.getItem("idToken");
     const form = new FormData();
     form.append('name', event || 'payment');
     form.append('amount', amount || '0');
@@ -124,9 +140,11 @@ document.addEventListener("DOMContentLoaded", () => {
         if (studentMeta[k] !== undefined && studentMeta[k] !== null) form.append(k, studentMeta[k]);
       });
     }
-    const res = await fetch(`${SERVER_BASE}/api/payments`, {
+
+    // Use fetchWithAuth to attach idToken if available
+    const res = await fetchWithAuth(`${SERVER_BASE}/api/payments`, {
       method: 'POST',
-      headers: idToken ? { Authorization: `Bearer ${idToken}` } : {},
+      // DO NOT set Content-Type for FormData; browser will set boundary
       body: form
     });
     if (!res.ok) {
@@ -224,21 +242,24 @@ document.addEventListener("DOMContentLoaded", () => {
   // Load payment history (server preference then local fallback)
   // ----------------------
   async function loadPaymentHistory() {
-    const idToken = localStorage.getItem("idToken");
-    const email = localStorage.getItem("studentEmail") || "";
     try {
+      // Prefer authenticated per-user endpoint when token present
+      const idToken = getIdToken();
       if (idToken) {
-        const res = await fetch(`${SERVER_BASE}/api/my-payments`, { headers: { Authorization: `Bearer ${idToken}` } });
+        const res = await fetchWithAuth(`${SERVER_BASE}/api/my-payments`);
         if (res.ok) {
           const list = await res.json();
           renderPaymentHistoryFromArray(list);
           return;
         }
       }
-      const resAll = await fetch(`${SERVER_BASE}/api/payments`);
+
+      // Fallback to all payments then filter by email/uid
+      const resAll = await fetchWithAuth(`${SERVER_BASE}/api/payments`);
       if (resAll.ok) {
         const all = await resAll.json();
         const uid = localStorage.getItem("spartapay_uid");
+        const email = localStorage.getItem("studentEmail") || "";
         const filtered = uid ? all.filter(p => p.submittedByUid === uid || p.submittedByEmail === email) : all.filter(p => p.submittedByEmail === email);
         renderPaymentHistoryFromArray(filtered);
         return;
