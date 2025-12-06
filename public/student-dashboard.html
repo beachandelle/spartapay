@@ -1,0 +1,178 @@
+<!-- student-dashboard.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SpartaPay | Student Dashboard</title>
+  <link rel="stylesheet" href="student-dashboard.css">
+</head>
+<body>
+  <!-- Header with BSU logo, Nav and Profile Dropdown -->
+  <header>
+    <div class="header-left">
+      <!-- Replaced greeting with BSU logo -->
+      <img id="bsuLogo" src="bsu-logo.png" alt="BSU Logo" width="160" height="40">
+      <!-- Simple nav bar -->
+      <nav class="main-nav" aria-label="Main navigation">
+        <button id="homeBtn" type="button" class="nav-link btn-ghost">Home</button>
+        <!-- future tabs can go here -->
+      </nav>
+    </div>
+
+    <div class="profile">
+      <div class="profile-btn-wrapper" id="profileBtnWrapper" aria-haspopup="true" aria-expanded="false">
+        <img src="default-profile.png" alt="Profile" id="profilePic" class="profile-icon">
+        <span class="dropdown-icon" aria-hidden="true">▼</span>
+      </div>
+
+      <div class="dropdown-menu hidden" id="profileDropdown" role="menu" aria-label="Profile menu">
+        <button id="profileBtn" type="button" role="menuitem">Profile</button>
+        <button id="logoutBtn" type="button" role="menuitem">Logout</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Greeting moved here, above Payment History -->
+    <h2 id="pageGreeting" class="page-greeting">Hello, <span id="studentName">Student</span></h2>
+
+    <!-- Payment History Table -->
+    <section id="paymentHistory" class="wizard-step card">
+      <h3>Your Payment History</h3>
+      <div class="table-wrap">
+        <table id="historyTable" class="table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Event</th>
+              <th>Amount Paid</th>
+              <th>Reference Number</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="historyTableBody">
+            <!-- Fetched payment records will appear here -->
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <div class="button-container">
+      <button id="payNowBtn" type="button" class="btn primary">Pay Now</button>
+    </div>
+
+    <!-- Payment Flow Sections -->
+    <section id="paymentFlow" class="hidden wizard-step">
+      <!-- Step 1: Select Org and Event -->
+      <div id="selectEventSection" class="card">
+        <h3>Select Organization and Event</h3>
+        <label for="orgSelect">Organization:</label>
+        <select id="orgSelect">
+          <option value="" disabled selected>Select organization</option>
+        </select>
+
+        <label for="eventSelect">Event:</label>
+        <select id="eventSelect">
+          <option value="" disabled selected>Select event</option>
+        </select>
+
+        <button id="confirmDetailsBtn" type="button" class="btn primary">Confirm Details</button>
+      </div>
+
+      <!-- Step 2: Confirm Details -->
+      <div id="confirmDetailsSection" class="hidden card">
+        <h3>Confirm Payment Details</h3>
+        <p id="paymentText"></p>
+        <button id="proceedPaymentBtn" type="button" class="btn primary">Proceed to Payment</button>
+      </div>
+
+      <!-- Step 3 & 4 Combined: Payment Panel -->
+      <div id="paymentPanelSection" class="hidden card">
+        <h3>Payment Details</h3>
+        <div class="payment-panel" style="display:flex; gap:20px; flex-wrap:wrap;">
+          <!-- Left Column: QR and Payment Info -->
+          <div class="payment-left" style="flex:1; text-align:center;">
+            <div id="qrContainer"></div>
+            <p id="receiverInfo">Receiver: </p>
+            <p id="amountInfo">Amount: </p>
+          </div>
+
+          <!-- Right Column: Fill Up Details Form -->
+          <div class="payment-right" style="flex:1;">
+            <form id="paymentForm">
+              <label>Amount Paid</label>
+              <input type="number" id="amountPaid" required>
+
+              <label>Date of Payment</label>
+              <input type="date" id="paymentDate" required>
+
+              <label>Reference Number</label>
+              <input type="text" id="referenceNumber" required>
+
+              <label>Proof of Payment</label>
+              <input type="file" id="proofFile" accept="image/*" required>
+
+              <div style="display:flex; gap:12px; margin-top:12px;">
+                <button type="submit" class="btn primary">Finalize Payment</button>
+                <!-- New Cancel button to back out of payment flow -->
+                <button id="cancelPaymentBtn" type="button" class="btn secondary">Cancel</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 5: Done (moved outside paymentFlow so it can be shown independently) -->
+    <div id="doneSection" class="hidden card" style="text-align:center;">
+      <h3>Thank you for your payment!</h3>
+      <p>Your transaction is under review. Once verified, the status will be updated on your dashboard.</p>
+      <!-- JS will render an "Okay" button here when showing confirmation -->
+    </div>
+
+    <!-- Profile Form -->
+    <div id="profileForm" class="hidden wizard-step card">
+      <h3>Student Profile</h3>
+      <img src="default-profile.png" id="profilePicForm" alt="Profile" width="120" class="profile-pic">
+
+      <label>Name</label>
+      <input type="text" id="studentFullName" readonly>
+
+      <label>Email</label>
+      <input type="email" id="studentEmail" readonly>
+
+      <label>Year</label>
+      <select id="studentYear" disabled>
+        <option value="">Select Year</option>
+        <option value="1st Year">1st Year</option>
+        <option value="2nd Year">2nd Year</option>
+        <option value="3rd Year">3rd Year</option>
+        <option value="4th Year">4th Year</option>
+      </select>
+
+      <label>College</label>
+      <select id="studentCollege" disabled>
+        <option value="">Select College</option>
+      </select>
+
+      <label>Department</label>
+      <select id="studentDepartment" disabled>
+        <option value="">Select Department</option>
+      </select>
+
+      <label>Program</label>
+      <select id="studentProgram" disabled>
+        <option value="">Select Program</option>
+      </select>
+
+      <div style="margin-top:12px;">
+        <button id="editSaveProfileBtn" type="button" class="btn primary">Edit</button>
+        <button id="cancelProfileBtn" type="button" class="btn secondary hidden">Cancel</button>
+      </div>
+    </div>
+  </main>
+
+  <script type="module" src="student-dashboard.js"></script>
+</body>
+</html>

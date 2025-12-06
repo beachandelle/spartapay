@@ -1,0 +1,210 @@
+<!-- officer-dashboard.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Officer Dashboard</title>
+  <link rel="stylesheet" href="officer-dashboard.css" />
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <!-- NOTE: filename changed to avoid spaces. Rename your asset to bsu-logo.png -->
+      <img id="bsuLogo" src="bsu-logo.png" alt="BSU Logo" />
+      <nav class="main-nav" aria-label="Main navigation">
+        <button id="homeBtn" class="nav-link" type="button">Home</button>
+      </nav>
+    </div>
+
+    <div class="profile">
+      <div class="profile-btn-wrapper" id="profileBtnWrapper" aria-haspopup="true" aria-expanded="false">
+        <img id="profilePic" src="profile.png" alt="Profile" class="profile-icon">
+        <span class="dropdown-icon" aria-hidden="true">▾</span>
+      </div>
+
+      <div class="dropdown-menu hidden" id="profileDropdown" role="menu" aria-labelledby="profileBtnWrapper">
+        <button id="profileBtn" type="button" role="menuitem">Profile</button>
+        <button id="logoutBtn" type="button" role="menuitem">Logout</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <h2 id="headerTitle" class="page-greeting">Hello <span id="officerName">Org</span></h2>
+
+    <section class="card" id="eventsCard">
+      <div class="card-header">
+        <h3>Your Events</h3>
+        <div class="card-actions">
+          <button id="addEventBtn" type="button" class="btn primary">Add Event</button>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table id="eventTable" class="table">
+          <thead>
+            <tr>
+              <th>Event</th>
+              <th>Fee</th>
+              <th>Deadline</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Payments to Verify view (hidden by default; shown when user clicks View on an event) -->
+    <section id="verifyPayments" class="card hidden" aria-live="polite">
+      <div class="card-header" style="align-items:center; display:flex; gap:12px;">
+        <div class="payments-header" style="flex:1; align-items:center;">
+          <button id="backToEventsBtn" class="btn-back" type="button">← Back</button>
+          <h3 id="eventPaymentsHeading" style="margin:0 0 0 6px;">Payments</h3>
+        </div>
+        <div class="card-actions">
+          <!-- Filter button (placeholder) -->
+          <button id="filterBtn" class="btn secondary" type="button">Filter</button>
+        </div>
+      </div>
+
+      <!-- Stats row moved here under the Payments heading -->
+      <div id="paymentStats" class="payment-stats" aria-hidden="false" style="margin:10px 0;"></div>
+
+      <div class="table-wrap">
+        <table id="verifyTable" class="table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Student</th>
+              <th>Amount</th>
+              <th>Reference</th>
+              <th>Proof</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- populated by JS when an event is selected -->
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Add Event Form (card) -->
+    <section id="addEventForm" class="card hidden">
+      <h3>ADD A PAYMENT EVENT</h3>
+
+      <div id="step1">
+        <h4>Official Event Details</h4>
+
+        <label>Event Name</label>
+        <input type="text" id="eventName" placeholder="Event Name">
+
+        <label>Deadline</label>
+        <input type="date" id="eventDeadline">
+
+        <label>Amount to Pay</label>
+        <input type="number" id="eventFee" placeholder="Amount">
+
+        <h4>Authorized Receiver Details</h4>
+        <label>Gcash Number</label>
+        <input type="text" id="receiverNumber" placeholder="Gcash Number">
+
+        <label>Name</label>
+        <input type="text" id="receiverName" placeholder="Receiver Name">
+
+        <label>Attach QR Code</label>
+        <input type="file" id="receiverQR" accept="image/*">
+
+        <div class="form-actions">
+          <button id="nextStepBtn" type="button" class="btn primary">Next</button>
+          <button id="cancelAddEvent" type="button" class="btn secondary">Cancel</button>
+        </div>
+      </div>
+
+      <div id="step2" class="hidden">
+        <h4>CONFIRM PAYMENT EVENT</h4>
+        <div class="confirm-grid">
+          <div>
+            <h5>Official Event Details</h5>
+            <p>Event Name: <span id="confirmEventName"></span></p>
+            <p>Deadline: <span id="confirmDeadline"></span></p>
+            <p>Amount: <span id="confirmAmount"></span></p>
+          </div>
+          <div>
+            <h5>Authorized Receiver Details</h5>
+            <p>Gcash Number: <span id="confirmNumber"></span></p>
+            <p>Name: <span id="confirmName"></span></p>
+            <p>QR Code:</p>
+            <img id="confirmQR" src="" alt="QR Code" width="120">
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button id="addEventConfirmBtn" type="button" class="btn primary">Confirm</button>
+          <button id="backToStep1Btn" type="button" class="btn secondary">Back</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Profile Form (card) -->
+    <section id="profileForm" class="card hidden">
+      <h3>Officer Profile</h3>
+
+      <label>Organization Name</label>
+      <input type="text" id="profileOrg" placeholder="Organization Name" readonly>
+
+      <h4>Current Fund Handler Details</h4>
+      <label>Name</label>
+      <div class="name-row">
+        <input type="text" id="surname" placeholder="Surname" readonly>
+        <input type="text" id="givenName" placeholder="Name" readonly>
+        <input type="text" id="middleInitial" placeholder="Middle Initial" readonly>
+      </div>
+
+      <label>Designation</label>
+      <input type="text" id="designation" placeholder="Role" readonly>
+
+      <label>Year</label>
+      <select id="year" disabled>
+        <option value="">-- Select Year --</option>
+        <option value="1st">1st Year</option>
+        <option value="2nd">2nd Year</option>
+        <option value="3rd">3rd Year</option>
+        <option value="4th">4th Year</option>
+      </select>
+
+      <label>College</label>
+      <select id="college" disabled>
+        <option value="">-- Select College --</option>
+        <option value="COE">College of Engineering</option>
+        <option value="CAFAD">College of Architecture, Fine Arts and Design</option>
+        <option value="CICS">College of Informatics and Computing Sciences</option>
+        <option value="CET">College of Engineering Technology</option>
+      </select>
+
+      <label>Department</label>
+      <select id="department" disabled>
+        <option value="">-- Select Department --</option>
+      </select>
+
+      <label>Program</label>
+      <select id="program" disabled>
+        <option value="">-- Select Program --</option>
+      </select>
+
+      <div class="form-actions">
+        <button id="editSaveProfileBtn" type="button" class="btn primary">Edit</button>
+        <button id="cancelEditProfileBtn" type="button" class="btn secondary hidden">Cancel</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Proof modal (hidden by default) -->
+  <div id="proofModal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="proofModalTitle"></div>
+
+  <script src="officer-dashboard.js" type="module"></script>
+</body>
+</html>

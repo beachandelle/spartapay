@@ -1,0 +1,169 @@
+/* student-dashboard.css
+   Updated to match officer UI styling: shared accent, card UI, table header gradient, button styles.
+   Kept all original semantic structure and added enhancements.
+*/
+
+:root{
+  --accent: #b30000;
+  --accent-dark: #900000;
+  --muted: #f5f5f6;
+  --card-bg: #ffffff;
+  --surface-shadow: 0 4px 12px rgba(0,0,0,0.06);
+  --surface-shadow-strong: 0 8px 20px rgba(0,0,0,0.08);
+  --radius: 10px;
+  --max-width: 1000px;
+  --text-muted: #666;
+  --success: #28a745;
+  --danger: #dc3545;
+  --blue: #007bff;
+}
+
+/* Base */
+* { box-sizing: border-box; }
+html,body { height: 100%; }
+body {
+  font-family: 'Poppins', sans-serif;
+  background: #f7f8fa;
+  margin: 0;
+  color: #222;
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  line-height: 1.4;
+}
+
+/* Header */
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--card-bg);
+  box-shadow: var(--surface-shadow);
+  padding: 12px 28px;
+  position: sticky;
+  top: 0;
+  z-index: 80;
+}
+
+.header-left { display:flex; align-items:center; gap:20px; }
+#bsuLogo { height:36px; width:auto; object-fit:contain; }
+
+/* Nav link ghost */
+.btn-ghost {
+  background:transparent;
+  border:1px solid transparent;
+  color:#333;
+  padding:6px 10px;
+  border-radius:8px;
+  cursor:pointer;
+  font-weight:600;
+}
+.btn-ghost:hover { background:#fafafa; border-color:#eee; }
+
+/* Profile */
+.profile { 
+  position:relative; 
+  display:flex; 
+  align-items:center; 
+}
+
+.profile-btn-wrapper { 
+  display:flex; 
+  align-items:center; 
+  gap:8px; 
+  cursor:pointer; 
+}
+
+.profile-icon, .profile-pic { width:40px; height:40px; border-radius:50%; object-fit:cover; border:2px solid #ddd; transition: transform .15s ease, border-color .15s ease; }
+.profile-icon:hover, .profile-pic:hover { transform:scale(1.05); border-color:var(--accent); }
+
+/* Dropdown menu */
+.dropdown-menu { position:absolute; top:58px; right:0; background:var(--card-bg); box-shadow:var(--surface-shadow-strong); border-radius:10px; width:160px; padding:8px 6px; z-index:120; display:flex; flex-direction:column; }
+.dropdown-menu button { border:none; background:none; padding:12px 14px; text-align:left; cursor:pointer; color:#333; font-weight:500; border-radius:8px; }
+.dropdown-menu button:hover { background:#f6f6f6; color:#000; }
+
+/* Hidden */
+.hidden { display:none !important; }
+
+/* Layout container */
+main { max-width: var(--max-width); margin: 40px auto; padding: 0 20px; }
+
+/* Card */
+.card { background: var(--card-bg); border-radius: var(--radius); box-shadow: var(--surface-shadow); padding: 18px; margin-bottom: 20px; }
+
+/* Page greeting */
+.page-greeting { margin: 8px 0 18px; color: #222; font-size: 26px; font-weight: 700; }
+.page-greeting span { color: var(--accent); }
+
+/* Table wrap and table */
+.table-wrap { overflow:auto; border-radius:8px; }
+.table { width:100%; border-collapse:collapse; min-width:600px; background: #fff; }
+.table thead th {
+  text-align:left;
+  padding:12px 14px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-dark));
+  color: #fff;
+  font-weight:700;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  border-bottom: 2px solid rgba(255,255,255,0.08);
+}
+.table tbody td {
+  padding:12px 14px;
+  border-top:1px solid #f3f3f3;
+  vertical-align:middle;
+  color: #1f1f1f;
+  font-size: 14px;
+}
+.table tbody tr:hover { background: #fff6f6; }
+
+/* Buttons (match officer) */
+.btn {
+  border-radius:8px;
+  padding:8px 12px;
+  border: none;
+  cursor:pointer;
+  font-weight:600;
+  font-size:14px;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+}
+.btn.primary { background:var(--accent); color:#fff; }
+.btn.primary:hover { background:var(--accent-dark); }
+.btn.secondary { background:#fff; border:1px solid #ddd; color:#333; }
+
+/* Form inputs and selects */
+input, select, textarea { width:100%; padding:8px 10px; border-radius:8px; border:1px solid #ddd; margin-top:6px; font-size:14px; background:#fff; box-shadow:none; }
+input[type="file"] { padding:6px; }
+
+/* Payment panel layout */
+.payment-panel { display:flex; gap:30px; align-items:flex-start; flex-wrap:wrap; }
+.payment-left { flex: 1 1 220px; text-align:center; }
+.payment-left #qrContainer img { max-width: 150px; height:auto; display:inline-block; border-radius:6px; border:1px solid #eee; background:#fff; }
+
+/* Form inside payment panel */
+.payment-right { flex: 1 1 320px; }
+#paymentForm { display:flex; flex-direction:column; }
+#paymentForm label { font-weight:600; margin-top:8px; }
+#paymentForm button[type="submit"] { margin-top:12px; align-self:flex-start; padding:10px 18px; min-width:140px; }
+
+/* Done Section */
+#doneSection { text-align:center; }
+
+/* Misc helpers */
+.table th, .table td { text-align:center; }
+h3 { color: var(--accent); }
+
+/* Responsive */
+@media (max-width:900px) {
+  main { margin: 20px; }
+  .table { min-width: 0; }
+}
+@media (max-width:700px) {
+  .payment-panel { flex-direction:column; gap:20px; }
+  .payment-left, .payment-right { flex:1 1 100%; }
+  #paymentForm button[type="submit"] { width:100%; align-self:stretch; }
+}
+
+/* Filter / drawer and modal styles are not changed here for student; officer modal styles used elsewhere. */

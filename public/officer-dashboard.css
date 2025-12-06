@@ -1,0 +1,416 @@
+/* officer-dashboard.css - full stylesheet including stats layout & colors
+   Adjusted so the main events table header matches the red/white style of the
+   payments (verify) table header, and the organization name in the greeting is red.
+   All other styles preserved.
+*/
+
+:root{
+  --accent: #b30000;        /* red */
+  --accent-dark: #900000;
+  --muted: #f5f5f6;
+  --card-bg: #ffffff;
+  --surface-shadow: 0 4px 12px rgba(0,0,0,0.06);
+  --surface-shadow-strong: 0 8px 20px rgba(0,0,0,0.08);
+  --radius: 10px;
+  --max-width: 1100px;
+  --text-muted: #666;
+  --success: #28a745;       /* green for approved number */
+  --danger: #dc3545;
+  --blue: #007bff;
+}
+
+/* Base */
+*{box-sizing: border-box;}
+html,body { height: 100%; }
+body {
+  font-family: 'Poppins', sans-serif;
+  background: #f7f8fa;
+  margin: 0;
+  color: #222;
+  -webkit-font-smoothing:antialiased;
+  -moz-osx-font-smoothing:grayscale;
+  line-height: 1.35;
+}
+
+/* Header */
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--card-bg);
+  box-shadow: var(--surface-shadow);
+  padding: 12px 28px;
+  position: sticky;
+  top: 0;
+  z-index: 80;
+}
+
+.header-left {
+  display:flex;
+  align-items:center;
+  gap:20px;
+}
+
+#bsuLogo { height:36px; width:auto; object-fit:contain; }
+
+.main-nav { display:flex; gap:8px; align-items:center; }
+.nav-link {
+  background:transparent;
+  border:1px solid transparent;
+  color:#333;
+  padding:6px 10px;
+  border-radius:8px;
+  cursor:pointer;
+  font-weight:600;
+}
+.nav-link:hover{ background:#fafafa; border-color:#eee; }
+
+/* Profile button wrapper */
+.profile { position:relative; display:flex; align-items:center; }
+.profile-btn-wrapper {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  cursor:pointer;
+  padding:4px;
+  border-radius:50px;
+}
+.profile-icon {
+  width:40px;
+  height:40px;
+  border-radius:50%;
+  object-fit:cover;
+  border:2px solid #ddd;
+  transition: transform .15s ease, border-color .15s ease;
+}
+.profile-icon:hover { transform:scale(1.05); border-color:var(--accent); }
+
+.dropdown-icon { color:#555; font-size:14px; line-height:1; margin-left:2px; }
+
+.dropdown-menu {
+  position:absolute;
+  top:58px;
+  right:0;
+  background:var(--card-bg);
+  box-shadow:var(--surface-shadow-strong);
+  border-radius:10px;
+  width:180px;
+  padding:8px 6px;
+  z-index:120;
+  display:flex;
+  flex-direction:column;
+}
+.dropdown-menu button {
+  border:none;
+  background:none;
+  padding:12px 14px;
+  text-align:left;
+  cursor:pointer;
+  color:#333;
+  font-weight:500;
+  border-radius:8px;
+}
+.dropdown-menu button:hover { background:#f6f6f6; color:#000; }
+
+/* Hidden helper */
+.hidden{ display:none !important; }
+
+/* Layout container */
+.container {
+  max-width: var(--max-width);
+  margin: 32px auto;
+  padding: 0 20px;
+}
+
+/* Greeting */
+.page-greeting {
+  margin: 8px 0 18px;
+  color: #222;
+  font-size: 28px;
+  font-weight: 700;
+}
+/* Org name emphasized in red per request */
+#officerName { color: var(--accent); margin-left:6px; font-weight:700; }
+
+/* Card */
+.card {
+  background: var(--card-bg);
+  border-radius: var(--radius);
+  box-shadow: var(--surface-shadow);
+  padding: 18px;
+  margin-bottom: 20px;
+}
+
+/* Card header */
+.card-header {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  margin-bottom:12px;
+  gap:12px;
+}
+.card-header h3 { margin:0; color:var(--accent); }
+
+/* Card actions */
+.card-actions { display:flex; gap:8px; align-items:center; }
+
+/* Table styles */
+.table-wrap { overflow:auto; border-radius:8px; }
+.table {
+  width:100%;
+  border-collapse:collapse;
+  min-width:720px;
+}
+.table thead th {
+  /* Changed to match the verify table header style (red gradient + white text) */
+  text-align:left;
+  padding:12px 14px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-dark));
+  color: #fff;
+  font-weight:700;
+  position:sticky;
+  top:0;
+  z-index:2;
+  border-bottom: 2px solid rgba(255,255,255,0.08);
+}
+.table tbody td {
+  padding:12px;
+  border-top:1px solid #f3f3f3;
+  vertical-align:middle;
+  word-break:break-word;
+}
+
+/* Payments-specific visual overrides (kept in case of separate verify table) */
+#verifyTable thead th {
+  text-align:left;
+  padding:12px 14px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-dark));
+  color: #fff;
+  font-weight:700;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  border-bottom: 2px solid rgba(255,255,255,0.08);
+}
+#verifyTable tbody td {
+  padding:12px 14px;
+  border-top:1px solid #f3f3f3;
+  vertical-align:middle;
+  color: #1f1f1f;
+  font-size: 14px;
+}
+#verifyTable tbody tr:hover { background: #fff6f6; }
+
+/* Proof button */
+.proof-btn {
+  background: transparent;
+  color: var(--accent-dark);
+  border: 1px solid rgba(179,0,0,0.12);
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight:600;
+}
+.proof-btn:hover {
+  background: rgba(179,0,0,0.06);
+  color: var(--accent);
+}
+
+/* Filter placeholder button */
+#filterBtn { min-width: 84px; }
+
+/* Status select */
+.status-select { padding:8px 10px; border-radius:8px; border:1px solid #ddd; background:#fff; font-weight:600; color:#222; }
+
+/* Buttons common */
+.btn {
+  border-radius:8px;
+  padding:8px 12px;
+  border: none;
+  cursor:pointer;
+  font-weight:600;
+  font-size:14px;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+}
+.btn.primary { background:var(--accent); color:#fff; }
+.btn.primary:hover { background:var(--accent-dark); }
+.btn.secondary { background:#fff; border:1px solid #ddd; color:#333; }
+.btn.ghost { background:transparent; color:var(--accent); border:1px solid transparent; }
+
+/* Small action buttons */
+.viewBtn, .editBtn, .deleteBtn {
+  padding:6px 8px; margin-right:6px; border-radius:6px; font-size:13px; color:#fff; border:none; cursor:pointer;
+}
+.viewBtn { background:var(--blue); }
+.editBtn { background:var(--success); }
+.deleteBtn { background:var(--danger); }
+
+/* Form inputs */
+input[type="text"], input[type="date"], input[type="number"], select, input[type="file"], textarea {
+  width:100%;
+  padding:8px 10px;
+  border-radius:8px;
+  border:1px solid #ddd;
+  margin-top:6px;
+  font-size:14px;
+  background:#fff;
+  box-shadow:none;
+}
+
+/* Form layout */
+.form-actions {
+  display:flex;
+  gap:10px;
+  margin-top:16px;
+  justify-content:flex-end;
+}
+.name-row { display:flex; gap:8px; }
+.name-row input { flex:1; }
+
+/* Confirm grid */
+.confirm-grid { display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap; }
+.confirm-grid > div { flex:1; min-width:220px; }
+
+/* small helpers */
+.table-wrap td .small-muted { color:var(--text-muted); font-size:13px; }
+
+/* Payments view header + back button */
+.payments-header {
+  display:flex;
+  align-items:center;
+  gap:12px;
+  margin-bottom:12px;
+}
+.btn-back {
+  background:#fff;
+  border:1px solid #ddd;
+  padding:6px 10px;
+  border-radius:6px;
+  cursor:pointer;
+  color:#333;
+}
+
+/* proof modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 500;
+}
+.modal-card {
+  background: white;
+  border-radius: 10px;
+  padding: 16px;
+  max-width: 92%;
+  max-height: 92%;
+  overflow: auto;
+  box-shadow: var(--surface-shadow-strong);
+}
+.modal-card img { max-width: 100%; height: auto; display:block; margin:8px auto; border-radius:6px; }
+.modal-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
+
+/* Utility / accessibility */
+.small-muted { color:var(--text-muted); font-size:13px; }
+.center { text-align:center; }
+
+/* Responsive adjustments */
+@media (max-width:1200px) {
+  :root { --max-width: 960px; }
+}
+
+@media (max-width:900px) {
+  .table { min-width: 0; }
+  .confirm-grid { flex-direction:column; }
+  header { padding:10px 16px; }
+  .container { padding:0 14px; }
+  .card-header { flex-direction:column; align-items:flex-start; gap:8px; }
+  .table thead th { font-size:13px; padding:10px; }
+  .table tbody td { padding:10px; font-size:13px; }
+  .btn { padding:8px 10px; font-size:13px; }
+}
+
+/* Small screens - stack table into card-like rows */
+@media (max-width:520px) {
+  .table thead { display:none; }
+  .table tbody td { display:block; width:100%; box-sizing:border-box; }
+  .table tbody tr { margin-bottom:12px; display:block; border-radius:8px; background:#fff; padding:8px; box-shadow:var(--surface-shadow); }
+  .payments-header h3 { font-size:16px; }
+}
+
+/* -------------------------
+   Stats layout and coloring
+   ------------------------- */
+
+/* Stats container - three columns: left, center, right */
+.payment-stats {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+/* Each stat item (legacy) */
+.stat-item {
+  flex: 1 1 0;
+  background: transparent;
+  padding: 6px 8px;
+}
+
+/* New: separate panel/card for each stat */
+.stat-card {
+  flex: 1 1 0;
+  background: #fff;
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: var(--surface-shadow);
+  border: 1px solid rgba(0,0,0,0.04);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 78px;
+}
+
+/* Left / center / right alignment helpers */
+.stat-card--left { text-align: left; }
+.stat-card--center { text-align: center; }
+.stat-card--right { text-align: right; }
+
+/* Label above number */
+.stat-label {
+  display: block;
+  color: #000;
+  font-weight: 600;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+/* Number styling */
+.stat-number {
+  display: block;
+  font-size: 18px;
+  font-weight: 800;
+  color: #000; /* default black */
+}
+
+/* paid count number (first stat) red */
+.stat-number.paid { color: var(--accent); }
+
+/* approved number green */
+.stat-number.approved { color: var(--success); }
+
+/* received remains black (default) */
+
+/* Small-screen adjustments: stack vertically */
+@media (max-width:700px) {
+  .payment-stats { flex-direction: column; align-items: stretch; }
+  .stat-item { text-align: left; }
+  .stat-item--center, .stat-item--right { text-align: left; }
+}
+
+/* End of stylesheet */
