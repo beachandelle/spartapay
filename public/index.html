@@ -1,0 +1,53 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SpartaPay Login</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="login-wrapper">
+    <div class="login-box">
+      <!-- Left Side -->
+      <div class="login-left">
+        <img src="bsu-logo.png" 
+             alt="BatStateU Logo" class="logo" />
+
+        <!-- User Type Selection -->
+        <div class="user-type-selection">
+          <button id="selectStudent" class="user-type-btn">Student</button>
+          <button id="selectOfficer" class="user-type-btn">Officer</button>
+        </div>
+
+        <!-- Officer Login Section -->
+        <div id="officerLogin" style="display: none; margin-top: 10px;">
+          <input type="text" id="email" placeholder="Username" />
+          <input type="password" id="password" placeholder="Password" />
+          <button id="loginBtn">Log in as Officer</button>
+          <p class="lost-password">Lost password?</p>
+        </div>
+
+        <!-- Student Login Section -->
+        <div id="studentLogin" style="display: none; margin-top: 10px;">
+          <h3>Sign in with</h3>
+          <button id="googleSignIn" class="google-btn">
+            <img src="https://www.svgrepo.com/show/355037/google.svg" alt="Google Icon" />
+            Google
+          </button>
+          <p class="cookies"><span>❗</span> Cookies notice</p>
+        </div>
+      </div>
+
+      <!-- Right Side -->
+      <div class="login-right">
+        <h3>Welcome to SpartaPay</h3>
+        <p>Please select your user type to continue.</p>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./firebase.js"></script>
+</body>
+</html>
