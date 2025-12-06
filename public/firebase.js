@@ -14,7 +14,7 @@ import {
 
 // Firebase configuration (keep this as-is for your project)
 const firebaseConfig = {
-  apiKey: "AIzaSyC7z_Fko_YdPHmQ6AWn0102k4qcmpO2Y4Q",
+  apiKey: "change this into your own key",
   authDomain: "spartapay-web.firebaseapp.com",
   projectId: "spartapay-web",
   storageBucket: "spartapay-web.appspot.com",
@@ -217,4 +217,5 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
   }
+
 });
