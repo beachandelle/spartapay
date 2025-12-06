@@ -32,7 +32,8 @@ const provider = new GoogleAuthProvider();
 window._firebaseAuth = auth;
 
 // server base URL (adjust if your server uses a different host/port)
-const SERVER_BASE = window.SERVER_BASE || "http://localhost:3001";
+// Use localhost only for local development; on deployed site use same-origin (empty string -> '/session' resolves to '/session')
+const SERVER_BASE = window.SERVER_BASE || ((window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? 'http://localhost:3001' : '');
 
 // Helper: call server /session to upsert user in Firestore (server verifies idToken)
 async function callServerSession(idToken) {
@@ -217,5 +218,4 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
   }
-
 });
