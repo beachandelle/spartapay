@@ -84,13 +84,24 @@ document.addEventListener("DOMContentLoaded", () => {
   let receivedTotalEl = null;
 
   // Server base (adjust if your server runs on a different host/port)
-  const SERVER_BASE = window.SERVER_BASE || "http://localhost:3001";
+  // Use localhost only for local development; on deployed site use same-origin (empty string -> '/api/...')
+  const SERVER_BASE = window.SERVER_BASE || ((window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') ? 'http://localhost:3001' : '');
 
   // ----------------------
   // Signed URL caching & helper
   // ----------------------
   function getIdToken() {
     try { return localStorage.getItem("idToken") || null; } catch (e) { return null; }
+  }
+
+  // Helper: unified fetch that attaches stored idToken when available
+  async function fetchWithAuth(url, options = {}) {
+    const headers = Object.assign({}, options.headers || {});
+    try {
+      const idToken = getIdToken();
+      if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+    } catch (e) { /* ignore */ }
+    return fetch(url, Object.assign({}, options, { headers }));
   }
 
   const signedUrlCache = new Map(); // key: paymentId -> { url, expiresAt, local }
@@ -101,10 +112,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (cached && cached.url && cached.expiresAt && cached.expiresAt > now + 2000) {
       return cached;
     }
-    const token = getIdToken();
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
     const endpoint = `${SERVER_BASE}/api/payments/${encodeURIComponent(paymentId)}/proof-url`;
-    const res = await fetch(endpoint, { method: 'GET', headers });
+    const res = await fetchWithAuth(endpoint, { method: 'GET' });
     if (!res.ok) {
       const txt = await res.text().catch(()=> '');
       throw new Error(`Failed to get signed url: ${res.status} ${txt}`);
@@ -122,10 +131,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // ----------------------
   async function fetchAllPaymentsFromServer() {
     try {
-      const token = getIdToken();
-      const headers = {};
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-      const res = await fetch(`${SERVER_BASE}/api/payments`, { method: 'GET', headers });
+      const res = await fetchWithAuth(`${SERVER_BASE}/api/payments`, { method: 'GET' });
       if (!res.ok) {
         console.debug('fetchAllPaymentsFromServer failed status:', res.status);
         return [];
@@ -483,7 +489,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // ----------------------
   async function putEventToServer(id, formData) {
     try {
-      const res = await fetch(`/api/events/${encodeURIComponent(id)}`, {
+      const res = await fetch(`${SERVER_BASE}/api/events/${encodeURIComponent(id)}`, {
         method: 'PUT',
         body: formData
       });
@@ -603,7 +609,7 @@ document.addEventListener("DOMContentLoaded", () => {
           const evId = e.target.getAttribute('data-ev-id');
           if (!evId) return;
           try {
-            const res = await fetch(`${SERVER_BASE}/api/events/${encodeURIComponent(evId)}`, { method: 'GET' });
+            const res = await fetchWithAuth(`${SERVER_BASE}/api/events/${encodeURIComponent(evId)}`, { method: 'GET' });
             if (!res.ok) {
               alert('Failed to fetch event details from server');
               return;
@@ -631,7 +637,7 @@ document.addEventListener("DOMContentLoaded", () => {
           const evId = e.target.getAttribute('data-ev-id');
           if (!evId) return;
           try {
-            const res = await fetch(`${SERVER_BASE}/api/events/${encodeURIComponent(evId)}`, { method: 'GET' });
+            const res = await fetchWithAuth(`${SERVER_BASE}/api/events/${encodeURIComponent(evId)}`, { method: 'GET' });
             if (!res.ok) { alert('Failed to fetch event for editing'); return; }
             const ev = await res.json();
             // populate form with server event
@@ -681,7 +687,7 @@ document.addEventListener("DOMContentLoaded", () => {
           if (!id) return;
           if (!confirm('Delete this server event? This will remove it for everyone.')) return;
           try {
-            const res = await fetch(`${SERVER_BASE}/api/events/${encodeURIComponent(id)}`, { method: 'DELETE' });
+            const res = await fetchWithAuth(`${SERVER_BASE}/api/events/${encodeURIComponent(id)}`, { method: 'DELETE' });
             if (!res.ok) {
               const txt = await res.text().catch(()=> '');
               throw new Error(txt || `Status ${res.status}`);
@@ -984,10 +990,7 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       if (normalized === 'approved') {
         const endpoint = `${SERVER_BASE}/api/payments/${encodeURIComponent(id)}/approve`;
-        const headers = {};
-        const token = getIdToken();
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-        const res = await fetch(endpoint, { method: 'POST', headers });
+        const res = await fetchWithAuth(endpoint, { method: 'POST' });
         if (!res.ok) {
           const txt = await res.text().catch(()=> '');
           throw new Error(txt || 'Server error');
@@ -1008,10 +1011,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // normalized === 'pending' attempt server unapprove
       try {
         const endpoint = `${SERVER_BASE}/api/payments/${encodeURIComponent(id)}/unapprove`;
-        const headers = {};
-        const token = getIdToken();
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-        const res = await fetch(endpoint, { method: 'POST', headers });
+        const res = await fetchWithAuth(endpoint, { method: 'POST' });
         if (res.ok) {
           const updated = await res.json();
           const paymentHistory = JSON.parse(localStorage.getItem("paymentHistory") || "[]");
@@ -1193,7 +1193,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // POST FormData helper
   async function postEventToServer(formData) {
     try {
-      const res = await fetch('/api/events', {
+      const res = await fetch(`${SERVER_BASE}/api/events`, {
         method: 'POST',
         body: formData // browser sets the multipart Content-Type boundary
       });
