@@ -412,6 +412,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  // NOTE: changed to write-through: attempt server upsert first, then update localStorage.
   async function saveProfile() {
     // Allow saving even if localStorage.officerOrg isn't set yet:
     const newOrg = getCurrentOrg() || (profileOrg && profileOrg.value ? profileOrg.value.trim() : '');
@@ -435,68 +436,108 @@ document.addEventListener("DOMContentLoaded", () => {
       photoURL: profilePic ? profilePic.src : ""
     };
 
+    // Preserve username if present locally
     const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-
-    // Try preserve username if present
     if (profilesMap[newOrg] && profilesMap[newOrg].username) {
       profileObj.username = profilesMap[newOrg].username;
     } else {
-      // Keep lastOfficerUsername if present
       const lastUser = localStorage.getItem("lastOfficerUsername") || "";
       if (lastUser) profileObj.username = lastUser;
     }
 
-    // Save per-org map and also write single-key fallback (only for convenience)
-    profilesMap[newOrg] = Object.assign({}, profilesMap[newOrg] || {}, profileObj);
-    localStorage.setItem("officerProfiles", JSON.stringify(profilesMap));
-    try { localStorage.setItem("officerOrg", newOrg); } catch (e) {}
-    localStorage.setItem("officerProfile", JSON.stringify(profileObj)); // single-key fallback
+    // Attempt server-first upsert. If server operations succeed, mirror authoritative profile.
+    try {
+      // Ensure organization exists on server first
+      const org = await upsertOrgOnServer(newOrg);
+      let orgId = null;
+      if (org && org.id) {
+        orgId = org.id;
+      }
 
-    // Persist lastOfficerUsername if username present
-    if (profileObj.username) localStorage.setItem("lastOfficerUsername", profileObj.username);
-
-    if (headerTitle) headerTitle.textContent = `Hello ${profileObj.org}`;
-    if (officerNameSpan) officerNameSpan.textContent = profileObj.org;
-
-    // Non-blocking attempt to ensure organization exists on server.
-    (async () => {
-      try {
-        const org = await upsertOrgOnServer(newOrg);
-        if (org && org.id) {
-          // store org id in profiles map for convenience
-          const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-          pm[newOrg] = pm[newOrg] || {};
-          pm[newOrg].orgId = org.id;
-          localStorage.setItem("officerProfiles", JSON.stringify(pm));
-          try { localStorage.setItem('officerOrgId', org.id); } catch(e) {}
-        }
-
-        // Now upsert the full profile to the server so other devices can read it
-        const orgIdToSend = (org && org.id) ? org.id : (profileObj.orgId || getCurrentOrgId() || null);
-        const serverResult = await upsertOfficerProfileToServer(newOrg, orgIdToSend, profileObj);
-        if (serverResult) {
-          // Mirror the authoritative server profile into localStorage map
-          try {
-            const key = serverResult.orgId || serverResult.org || serverResult.orgKey || newOrg;
-            const pm2 = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-            pm2[key] = Object.assign({}, pm2[key] || {}, serverResult);
-            localStorage.setItem("officerProfiles", JSON.stringify(pm2));
-            if (serverResult.orgId) {
-              try { localStorage.setItem('officerOrgId', serverResult.orgId); } catch(e) {}
-            }
-          } catch (e) {
-            console.warn('Failed to mirror server profile after upsert:', e);
+      // Now upsert the profile to the server
+      const serverResult = await upsertOfficerProfileToServer(newOrg, orgId, profileObj);
+      if (serverResult) {
+        // Mirror authoritative server profile into localStorage map
+        try {
+          const key = serverResult.orgId || serverResult.org || serverResult.orgKey || newOrg;
+          const pm2 = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
+          pm2[key] = Object.assign({}, pm2[key] || {}, serverResult);
+          localStorage.setItem("officerProfiles", JSON.stringify(pm2));
+          if (serverResult.orgId) {
+            try { localStorage.setItem('officerOrgId', serverResult.orgId); } catch(e) {}
           }
+          // Also set single-key fallback and officerOrg
+          try { localStorage.setItem("officerProfile", JSON.stringify(serverResult)); } catch(e) {}
+          try { localStorage.setItem("officerOrg", key); } catch(e) {}
+          if (serverResult.username) try { localStorage.setItem("lastOfficerUsername", serverResult.username); } catch(e) {}
+        } catch (e) {
+          console.warn('Failed to mirror server profile after upsert:', e);
         }
 
         // signal other tabs (same browser) to refresh org lists
         try {
           localStorage.setItem('orgsLastUpdated', String(Date.now()));
         } catch (e) { /* ignore */ }
-      } catch (e) {
-        console.warn('Failed to upsert org or profile after saving profile:', e);
+
+        // Update UI from serverResult
+        if (profileOrg) { profileOrg.value = serverResult.org || newOrg; profileOrg.readOnly = true; }
+        if (surnameInput) surnameInput.value = serverResult.name?.surname || profileObj.name.surname || "";
+        if (givenNameInput) givenNameInput.value = serverResult.name?.given || profileObj.name.given || "";
+        if (middleInitialInput) middleInitialInput.value = serverResult.name?.middle || profileObj.name.middle || "";
+        if (designationInput) designationInput.value = serverResult.designation || profileObj.designation || "";
+        if (yearSelect) yearSelect.value = serverResult.year || profileObj.year || "";
+        if (collegeSelect) collegeSelect.value = serverResult.college || profileObj.college || "";
+
+        // update departments/programs UI
+        if (departmentSelect) {
+          departmentSelect.innerHTML = '<option value="">-- Select Department --</option>';
+          if ((serverResult.college || profileObj.college) && collegeData[(serverResult.college || profileObj.college)]) {
+            Object.keys(collegeData[(serverResult.college || profileObj.college)]).forEach(dep => {
+              const opt = document.createElement("option"); opt.value = dep; opt.textContent = dep; departmentSelect.appendChild(opt);
+            });
+          }
+          departmentSelect.value = serverResult.department || profileObj.department || "";
+        }
+        if (programSelect) {
+          programSelect.innerHTML = '<option value="">-- Select Program --</option>';
+          const col = serverResult.college || profileObj.college;
+          const dep = serverResult.department || profileObj.department;
+          if (col && dep && collegeData[col] && collegeData[col][dep]) {
+            collegeData[col][dep].forEach(prog => {
+              const opt = document.createElement("option"); opt.value = prog; opt.textContent = prog; programSelect.appendChild(opt);
+            });
+          }
+          programSelect.value = serverResult.program || profileObj.program || "";
+        }
+
+        if (headerTitle) headerTitle.textContent = `Hello ${serverResult.org || newOrg}`;
+        if (officerNameSpan) officerNameSpan.textContent = serverResult.org || newOrg;
+
+        alert("Profile saved successfully!");
+        return;
+      } else {
+        // server did not return result - fallback to local save below
+        console.warn('Server did not return upsert result; falling back to local save.');
       }
-    })();
+    } catch (e) {
+      console.warn('Failed to upsert org or profile on server, falling back to local save:', e);
+    }
+
+    // Fallback local-only save (only if server path failed)
+    try {
+      const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
+      pm[newOrg] = Object.assign({}, pm[newOrg] || {}, profileObj);
+      localStorage.setItem("officerProfiles", JSON.stringify(pm));
+      try { localStorage.setItem("officerOrg", newOrg); } catch (e) {}
+      localStorage.setItem("officerProfile", JSON.stringify(profileObj)); // single-key fallback
+      if (profileObj.username) localStorage.setItem("lastOfficerUsername", profileObj.username);
+      if (headerTitle) headerTitle.textContent = `Hello ${profileObj.org}`;
+      if (officerNameSpan) officerNameSpan.textContent = profileObj.org;
+      alert("Profile saved locally (server unavailable).");
+    } catch (e) {
+      console.warn('Failed to save profile locally:', e);
+      alert("Failed to save profile. Check console.");
+    }
   }
 
   function setProfileReadOnly(isReadOnly) {
@@ -522,11 +563,11 @@ document.addEventListener("DOMContentLoaded", () => {
         editSaveProfileBtn.textContent = "Save";
         if (cancelEditProfileBtn) cancelEditProfileBtn.classList.remove("hidden");
       } else {
-        // Save profile to per-org storage and upsert org on server
+        // Save profile to per-org storage and upsert org on server (write-through)
         saveProfile();
         setProfileReadOnly(true);
         editSaveProfileBtn.textContent = "Edit";
-        alert("Profile saved successfully!");
+        // NOTE: saveProfile will alert success/failure accordingly.
       }
     });
   }
@@ -879,6 +920,8 @@ document.addEventListener("DOMContentLoaded", () => {
               const locals = JSON.parse(localStorage.getItem("events") || "[]");
               const filtered = (locals || []).filter(l => !(l.id && l.id === id));
               localStorage.setItem("events", JSON.stringify(filtered));
+              // notify same-browser tabs and signal a refresh point
+              try { localStorage.setItem('eventsLastUpdated', String(Date.now())); } catch(e) {}
             } catch (e) { console.warn('Failed to clean local mirror after server delete:', e); }
 
             alert('Deleted event from server.');
@@ -894,6 +937,8 @@ document.addEventListener("DOMContentLoaded", () => {
           if (!confirm("Are you sure you want to delete this event?")) return;
           events.splice(globalIndex, 1);
           localStorage.setItem("events", JSON.stringify(events));
+          // notify same-browser tabs that events changed
+          try { localStorage.setItem('eventsLastUpdated', String(Date.now())); } catch(e) {}
           loadEvents();
           alert("Event deleted successfully!");
         }
@@ -1529,6 +1574,7 @@ document.addEventListener("DOMContentLoaded", () => {
             });
             filtered.unshift(updated);
             localStorage.setItem("events", JSON.stringify(filtered));
+            try { localStorage.setItem('eventsLastUpdated', String(Date.now())); } catch(e) {}
           } catch (e) {
             console.warn('Failed to update local mirror after PUT:', e);
           }
@@ -1599,12 +1645,14 @@ document.addEventListener("DOMContentLoaded", () => {
             });
             filtered.unshift(createdEvent);
             localStorage.setItem("events", JSON.stringify(filtered));
+            try { localStorage.setItem('eventsLastUpdated', String(Date.now())); } catch(e) {}
           } catch (e) {
             // fallback: just set created event as the only local event
             try {
               const local = JSON.parse(localStorage.getItem("events") || "[]");
               local.unshift(createdEvent);
               localStorage.setItem("events", JSON.stringify(local));
+              try { localStorage.setItem('eventsLastUpdated', String(Date.now())); } catch(e) {}
             } catch (e2) {
               console.warn('Failed to mirror created event locally:', e2);
             }
@@ -1655,10 +1703,24 @@ document.addEventListener("DOMContentLoaded", () => {
   // storage events to sync across tabs
   window.addEventListener("storage", (ev) => {
     if (!ev.key) return;
-    if (["paymentHistory","officerOrg","officerProfile","officerProfiles","events","orgsLastUpdated","officerOrgId"].includes(ev.key)) {
+    if (["paymentHistory","officerOrg","officerProfile","officerProfiles","events","orgsLastUpdated","officerOrgId","eventsLastUpdated"].includes(ev.key)) {
       loadProfile();
       loadEvents();
       if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
+    }
+  });
+
+  // Re-fetch authoritative server state when the tab becomes visible
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      try {
+        // Refresh profile and events from server (loadProfile/loadEvents try server-first)
+        loadProfile();
+        loadEvents();
+        if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
+      } catch (e) {
+        console.warn('visibilitychange refresh failed:', e);
+      }
     }
   });
 
