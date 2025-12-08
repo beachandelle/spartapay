@@ -232,6 +232,19 @@ async function upsertOrganizationByName(orgName, { displayName = null, logoUrl =
   return org;
 }
 
+// Helper: get org by id (Firestore preferred, fallback to local)
+async function getOrgById(orgId) {
+  if (!orgId) return null;
+  if (firestore) {
+    try {
+      const doc = await firestore.collection('organizations').doc(String(orgId)).get();
+      if (doc.exists) return doc.data();
+    } catch (e) { /* ignore */ }
+  }
+  const db = readDB();
+  return (db.organizations || []).find(o => o.id === orgId || o.name === orgId) || null;
+}
+
 // ----------------------
 // Helper: Firestore-backed read helpers (used when Firestore is configured)
 // ----------------------
@@ -239,7 +252,15 @@ async function listEventsFirestore(orgFilter = null) {
   if (!firestore) return null;
   try {
     let q = firestore.collection('events');
-    if (orgFilter) q = q.where('org', '==', orgFilter);
+    // support filtering by org (name) OR orgId (id)
+    if (orgFilter && typeof orgFilter === 'object') {
+      // expected shape: { orgId: '...', orgName: '...' }
+      if (orgFilter.orgId) q = q.where('orgId', '==', orgFilter.orgId);
+      else if (orgFilter.orgName) q = q.where('org', '==', orgFilter.orgName);
+    } else if (orgFilter) {
+      // legacy: treat as org name
+      q = q.where('org', '==', String(orgFilter));
+    }
     const snap = await q.get();
     return snap.docs.map(d => d.data());
   } catch (err) {
@@ -426,7 +447,7 @@ app.delete('/api/orgs/:id', async (req, res) => {
 
 // ----------------------
 // Events endpoints (NEW)
-// - GET /api/events (supports optional ?org=ORG_NAME filter)
+// - GET /api/events (supports optional ?org=ORG_NAME or ?orgId=ORG_ID filter)
 // - POST /api/events (multipart support)
 // - PUT /api/events/:id (multipart support added)
 // - DELETE /api/events/:id
@@ -434,13 +455,15 @@ app.delete('/api/orgs/:id', async (req, res) => {
 // When Firestore is configured, GET endpoints will read from Firestore.
 // ----------------------
 
-// GET /api/events - list all events (server-authoritative); supports optional org filter
+// GET /api/events - list all events (server-authoritative); supports optional org filter (by name) or orgId
 app.get('/api/events', async (req, res) => {
   try {
     const orgFilter = req.query.org ? String(req.query.org) : null;
+    const orgIdFilter = req.query.orgId ? String(req.query.orgId) : null;
 
     if (firestore) {
-      const events = await listEventsFirestore(orgFilter);
+      // prefer Firestore read; support filtering by orgId or org (name)
+      const events = await listEventsFirestore(orgIdFilter ? { orgId: orgIdFilter } : (orgFilter ? { orgName: orgFilter } : null));
       if (Array.isArray(events)) {
         return res.json(events);
       }
@@ -449,6 +472,7 @@ app.get('/api/events', async (req, res) => {
 
     const db = readDB();
     let events = (db.events || []).map(e => ({ ...e }));
+    if (orgIdFilter) events = events.filter(ev => ev.orgId === orgIdFilter);
     if (orgFilter) events = events.filter(ev => ev && ev.org === orgFilter);
     // return a shallow clone to avoid accidental mutation
     res.json(events);
@@ -478,11 +502,14 @@ app.get('/api/events/:id', async (req, res) => {
 });
 
 // POST /api/events - create event (accept JSON body OR multipart/form-data with receiverQR file)
+// Accepts either org (name) or orgId (canonical) from client. If orgId provided, server will resolve org name if possible.
 app.post('/api/events', upload.single('receiverQR'), async (req, res) => {
   try {
     // Accept both JSON and multipart/form-data
     // If multipart, form fields come in req.body as strings; receiver may be passed as JSON string
-    let { name, fee, deadline, org } = req.body || {};
+    let { name, fee, deadline } = req.body || {};
+    let org = req.body && req.body.org ? req.body.org : null;
+    const orgIdFromClient = req.body && req.body.orgId ? req.body.orgId : null;
     let receiver = req.body && req.body.receiver ? req.body.receiver : null;
 
     // If receiver is a JSON string (sent by the client), parse it
@@ -491,24 +518,32 @@ app.post('/api/events', upload.single('receiverQR'), async (req, res) => {
     }
 
     // Validate required fields
-    if (!name || !org) {
-      return res.status(400).json({ error: 'name and org are required' });
+    if (!name || (!org && !orgIdFromClient)) {
+      return res.status(400).json({ error: 'name and org or orgId are required' });
     }
 
     // Normalize values
     name = String(name);
     fee = typeof fee !== 'undefined' ? Number(fee) : 0;
     deadline = deadline || null;
-    org = String(org);
 
-    // Build initial event object
+    // Resolve org: prefer orgId if provided
+    let orgObj = null;
+    if (orgIdFromClient) {
+      orgObj = await getOrgById(orgIdFromClient);
+      if (!orgObj && org) orgObj = await upsertOrganizationByName(org, { displayName: org });
+    } else if (org) {
+      orgObj = await upsertOrganizationByName(org, { displayName: org });
+    }
+
     const newEvent = {
       id: uuidv4(),
       name,
       fee,
       deadline,
       status: 'Open',
-      org,
+      orgId: orgObj && orgObj.id ? orgObj.id : null,
+      org: orgObj && orgObj.name ? orgObj.name : (org || ''),
       receiver: receiver && typeof receiver === 'object' ? Object.assign({}, receiver) : (receiver || {}),
       createdAt: new Date().toISOString()
     };
@@ -555,9 +590,9 @@ app.post('/api/events', upload.single('receiverQR'), async (req, res) => {
     db.events.unshift(newEvent);
     writeDB(db);
 
-    // Auto-create/upsert organization record for this event's org (recommended default)
+    // Auto-create/upsert organization record for this event's org (already handled above)
     try {
-      await upsertOrganizationByName(org, { displayName: org });
+      if (!orgObj && newEvent.org) await upsertOrganizationByName(newEvent.org, { displayName: newEvent.org });
     } catch (err) {
       console.warn('Failed to upsert organization on event create:', err && err.message ? err.message : err);
     }
@@ -593,6 +628,19 @@ app.put('/api/events/:id', upload.single('receiverQR'), async (req, res) => {
     // If receiver is a JSON string (from multipart), parse it
     if (update && update.receiver && typeof update.receiver === 'string') {
       try { update.receiver = JSON.parse(update.receiver); } catch (e) { /* leave as string if parse fails */ }
+    }
+
+    // If orgId or org provided, resolve canonical org and set orgId/org
+    if (update.orgId || update.org) {
+      let orgObj = null;
+      if (update.orgId) orgObj = await getOrgById(update.orgId);
+      if (!orgObj && update.org) orgObj = await upsertOrganizationByName(update.org, { displayName: update.org });
+      if (orgObj) {
+        db.events[idx].orgId = orgObj.id;
+        db.events[idx].org = orgObj.name;
+      } else if (update.org) {
+        db.events[idx].org = update.org;
+      }
     }
 
     // allow updating name, fee, deadline, status, receiver, org
@@ -642,7 +690,7 @@ app.put('/api/events/:id', upload.single('receiverQR'), async (req, res) => {
 
     db.events[idx].updatedAt = new Date().toISOString();
 
-    // If org changed, ensure organization exists
+    // If org changed, ensure organization exists (already handled above)
     try {
       if (update.org) {
         await upsertOrganizationByName(update.org, { displayName: update.org });
@@ -661,7 +709,7 @@ app.put('/api/events/:id', upload.single('receiverQR'), async (req, res) => {
 
     return res.json(db.events[idx]);
   } catch (err) {
-    console.error('PUT /api/events/:id error:', err);
+    console.error('PUT /api/events/:id error:', err && err.message ? err.message : err);
     return res.status(500).json({ error: 'Server error' });
   }
 });
