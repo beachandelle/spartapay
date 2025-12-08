@@ -648,6 +648,7 @@ app.post('/api/officer-profiles', verifyFirebaseToken, async (req, res) => {
 
     // Signal other tabs/clients via localStorage key if running in same browser (server can't set localStorage on clients)
     // Client code already writes orgsLastUpdated when saving locally; keep that behavior on client.
+    console.log('Officer profile upserted for key=', key);
     return res.json(map[key] || profileObj);
   } catch (err) {
     console.error('POST /api/officer-profiles error:', err);
@@ -1056,13 +1057,46 @@ app.post('/api/payments', verifyFirebaseToken, upload.single('proof'), async (re
 
     // Optional client fields
     const reference = req.body.reference || req.body.referenceNumber || req.body.ref || null;
-    const org = req.body.org || null;
-    const event = req.body.event || null;
+    let org = req.body.org || null;
+    let event = req.body.event || null;
+    // new: accept canonical ids if provided
+    const orgIdFromClient = req.body.orgId || req.body.org_id || null;
+    const eventIdFromClient = req.body.eventId || req.body.event_id || null;
+
     const studentNameFromClient = req.body.studentName || req.body.student_name || null;
     const studentYear = req.body.studentYear || req.body.student_year || null;
     const studentCollege = req.body.studentCollege || req.body.student_college || null;
     const studentDepartment = req.body.studentDepartment || req.body.student_department || null;
     const studentProgram = req.body.studentProgram || req.body.student_program || null;
+
+    // If client provided orgId but not org name, attempt to resolve org name for readability
+    if (orgIdFromClient && !org) {
+      try {
+        const resolvedOrg = await getOrgById(orgIdFromClient);
+        if (resolvedOrg && resolvedOrg.name) {
+          org = resolvedOrg.name;
+        }
+      } catch (e) {
+        // ignore resolution failure
+      }
+    }
+
+    // If client provided eventId but not event name, attempt to resolve event name (Firestore preferred, fallback local)
+    if (eventIdFromClient && !event) {
+      try {
+        let ev = null;
+        if (firestore) {
+          ev = await getEventFirestoreById(eventIdFromClient);
+        }
+        if (!ev) {
+          const dbTmp = readDB();
+          ev = (dbTmp.events || []).find(e => e.id === eventIdFromClient) || null;
+        }
+        if (ev && ev.name) event = ev.name;
+      } catch (e) {
+        // ignore resolution failure
+      }
+    }
 
     // Upload file to Supabase if configured
     let proofUrl = null; // url we may include in this response (signed/public), may expire
@@ -1116,7 +1150,9 @@ app.post('/api/payments', verifyFirebaseToken, upload.single('proof'), async (re
       amount: parseFloat(amount),
       purpose: purpose || null,
       org: org || null,
+      orgId: orgIdFromClient || null,    // persist canonical orgId when present
       event: event || null,
+      eventId: eventIdFromClient || null, // persist canonical eventId when present
       reference: reference || null,
       // proofObjectPath stores either Supabase object path (for cloud) or local filename (if fallback)
       proofObjectPath: storedPath || null,
@@ -1149,6 +1185,8 @@ app.post('/api/payments', verifyFirebaseToken, upload.single('proof'), async (re
         console.warn('Failed to persist payment to Firestore:', err && err.message ? err.message : err);
       }
     }
+
+    console.log('Payment created', { id: payment.id, orgId: payment.orgId, eventId: payment.eventId, reference: payment.reference });
 
     // Return the created payment (includes proofFile for immediate viewing)
     return res.json(payment);
