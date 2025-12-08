@@ -238,6 +238,41 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // ----------------------
+  // New: fetch authenticated user's profile from server and mirror to localStorage
+  // - Calls GET /api/my-profile (requires idToken). If returned profile exists, persist to localStorage.studentProfile and update UI.
+  // ----------------------
+  async function fetchAndMirrorMyProfile() {
+    try {
+      const idToken = getIdToken();
+      if (!idToken) return null; // not authenticated; nothing to fetch
+
+      const res = await fetchWithAuth(`${SERVER_BASE}/api/my-profile`, { method: 'GET' });
+      if (!res.ok) {
+        // Not found or no profile; ignore
+        return null;
+      }
+      const payload = await res.json();
+      if (payload && payload.profile && typeof payload.profile === 'object') {
+        try {
+          localStorage.setItem('studentProfile', JSON.stringify(payload.profile));
+          if (payload.profile.displayName) localStorage.setItem('studentName', payload.profile.displayName);
+          if (payload.profile.email) localStorage.setItem('studentEmail', payload.profile.email);
+          if (payload.profile.photoURL) localStorage.setItem('profilePic', payload.profile.photoURL);
+          loadProfile();
+          return payload.profile;
+        } catch (e) {
+          console.warn('Failed to mirror profile to localStorage:', e);
+          return payload.profile;
+        }
+      }
+      return null;
+    } catch (err) {
+      console.warn('fetchAndMirrorMyProfile failed:', err);
+      return null;
+    }
+  }
+
+  // ----------------------
   // Render payment history
   // ----------------------
   function renderPaymentHistoryFromArray(arr) {
@@ -567,9 +602,19 @@ document.addEventListener("DOMContentLoaded", () => {
   // ----------------------
   // Initial load
   // ----------------------
-  loadEvents();
-  loadProfile();
-  loadPaymentHistory();
+  // First, try to fetch server-stored profile (if authenticated). Mirror it into localStorage then continue.
+  (async () => {
+    try {
+      await fetchAndMirrorMyProfile();
+    } catch (e) {
+      // ignore
+    } finally {
+      // existing initializers
+      loadEvents();
+      loadProfile();
+      loadPaymentHistory();
+    }
+  })();
 
   // ----------------------
   // Profile dropdown toggle
@@ -604,7 +649,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (els.logoutBtn) els.logoutBtn.addEventListener('click', () => { window.location.href = 'index.html'; });
 
   // ----------------------
-  // Edit/save profile (existing behavior)
+  // Edit/save profile (existing behavior) + server persist
   // ----------------------
   if (els.editSaveProfileBtn) {
     els.editSaveProfileBtn.addEventListener('click', () => {
@@ -632,6 +677,8 @@ document.addEventListener("DOMContentLoaded", () => {
           department: (els.studentDepartment?els.studentDepartment.value:'') || prevProfile.department || '',
           program: (els.studentProgram?els.studentProgram.value:'') || prevProfile.program || ''
         };
+
+        // Persist locally as before
         localStorage.setItem('studentProfile', JSON.stringify(updatedProfile));
         localStorage.setItem('studentName', updatedProfile.displayName || '');
         localStorage.setItem('studentEmail', updatedProfile.email || '');
@@ -642,6 +689,29 @@ document.addEventListener("DOMContentLoaded", () => {
         const editableFields2 = [els.studentYear, els.studentCollege, els.studentDepartment, els.studentProgram];
         editableFields2.forEach(el => { if (el) { el.disabled=true; el.style.backgroundColor='#e0e0e0'; el.style.cursor='not-allowed'; }});
         els.editSaveProfileBtn.textContent='Edit';
+
+        // Non-blocking server persist: POST to /session with profile payload so server.session.js will persist users/{uid}.profile
+        (async () => {
+          try {
+            const resp = await fetchWithAuth(`${SERVER_BASE}/session`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ profile: updatedProfile })
+            });
+            if (!resp.ok) {
+              const txt = await resp.text().catch(()=>'');
+              console.warn('/session profile persist failed:', resp.status, txt);
+            } else {
+              // optionally fetch back authoritative profile
+              try {
+                await fetchAndMirrorMyProfile();
+              } catch (e) { /* ignore */ }
+            }
+          } catch (e) {
+            console.warn('Failed to persist student profile to server:', e);
+          }
+        })();
+
         alert('Profile updated successfully!');
         showHome();
         if (els.cancelProfileBtn) els.cancelProfileBtn.classList.add('hidden');
