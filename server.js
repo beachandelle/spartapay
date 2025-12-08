@@ -9,6 +9,8 @@
 // - POST /api/payments/:id/approve, /unapprove and /reject
 // - NEW: GET /api/events, POST /api/events (multipart support), PUT /api/events/:id (multipart support added), DELETE /api/events/:id
 // - NEW: GET /api/orgs, GET /api/orgs/:id, POST /api/orgs, PUT /api/orgs/:id, DELETE /api/orgs/:id
+// - NEW: GET /api/officer-profiles, GET /api/officer-profiles/:id, POST /api/officer-profiles (upsert)
+//   These endpoints persist officer profiles to Firestore when configured, otherwise to local data.json
 //
 // Environment variables (in .env):
 // PORT, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_BUCKET, FIREBASE_SERVICE_ACCOUNT
@@ -40,9 +42,9 @@ app.use(express.static(path.join(__dirname, 'public')));
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-// Local DB fallback file (now includes payments, events AND organizations)
+// Local DB fallback file (now includes payments, events AND organizations and officerProfiles)
 const DB_FILE = path.join(__dirname, 'data.json');
-if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ payments: [], events: [], organizations: [] }, null, 2));
+if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ payments: [], events: [], organizations: [], officerProfiles: {} }, null, 2));
 
 function readDB() {
   try {
@@ -51,10 +53,11 @@ function readDB() {
     if (!db.payments) db.payments = [];
     if (!db.events) db.events = [];
     if (!db.organizations) db.organizations = [];
+    if (!db.officerProfiles) db.officerProfiles = {};
     return db;
   } catch (e) {
     console.warn('readDB error:', e);
-    return { payments: [], events: [], organizations: [] };
+    return { payments: [], events: [], organizations: [], officerProfiles: {} };
   }
 }
 function writeDB(db) {
@@ -62,6 +65,7 @@ function writeDB(db) {
   if (!db.payments) db.payments = [];
   if (!db.events) db.events = [];
   if (!db.organizations) db.organizations = [];
+  if (!db.officerProfiles) db.officerProfiles = {};
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
@@ -476,6 +480,177 @@ app.delete('/api/orgs/:id', async (req, res) => {
     return res.json({ ok: true, id: removed.id });
   } catch (err) {
     console.error('DELETE /api/orgs/:id error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ----------------------
+// Officer profiles endpoints
+// - GET /api/officer-profiles            -> list all or filter by ?org= or ?orgId=
+// - GET /api/officer-profiles/:id        -> get profile by id (orgId or canonical org name)
+// - POST /api/officer-profiles           -> upsert profile (requires auth when Firebase admin is configured)
+// Stored in Firestore collection 'officerProfiles' when available, otherwise in data.json.officerProfiles (object keyed by canonical org name)
+// ----------------------
+
+function canonicalKeyForOrg(orgName) {
+  return canonicalOrgName(orgName || '');
+}
+
+async function readOfficerProfilesFromDB() {
+  const db = readDB();
+  // store as object keyed by canonical org name -> profile object
+  return db.officerProfiles || {};
+}
+
+async function writeOfficerProfilesToDB(mapObj) {
+  const db = readDB();
+  db.officerProfiles = mapObj || {};
+  writeDB(db);
+}
+
+async function upsertOfficerProfileToFirestore(orgKey, payload) {
+  // orgKey: prefer orgId if provided else canonical org name
+  if (!firestore) throw new Error('Firestore not configured');
+  try {
+    const docId = String(orgKey);
+    const docRef = firestore.collection('officerProfiles').doc(docId);
+    const toSave = Object.assign({}, payload, { id: docId, orgKey });
+    await docRef.set(toSave, { merge: true });
+    return toSave;
+  } catch (err) {
+    throw err;
+  }
+}
+
+async function getOfficerProfileFromFirestoreByKey(orgKey) {
+  if (!firestore) return null;
+  try {
+    const doc = await firestore.collection('officerProfiles').doc(String(orgKey)).get();
+    if (!doc.exists) return null;
+    return doc.data();
+  } catch (err) {
+    console.warn('getOfficerProfileFromFirestoreByKey error:', err);
+    return null;
+  }
+}
+
+async function listOfficerProfilesFromFirestore() {
+  if (!firestore) return [];
+  try {
+    const snap = await firestore.collection('officerProfiles').get();
+    return snap.docs.map(d => d.data());
+  } catch (err) {
+    console.warn('listOfficerProfilesFromFirestore error:', err);
+    return [];
+  }
+}
+
+// GET /api/officer-profiles
+app.get('/api/officer-profiles', async (req, res) => {
+  try {
+    const orgQuery = req.query.org ? String(req.query.org) : null;
+    const orgIdQuery = req.query.orgId ? String(req.query.orgId) : null;
+
+    if (firestore) {
+      // if filtering, try to read specific doc
+      if (orgIdQuery) {
+        const doc = await getOfficerProfileFromFirestoreByKey(orgIdQuery);
+        return res.json(doc ? [doc] : []);
+      }
+      if (orgQuery) {
+        const key = canonicalKeyForOrg(orgQuery);
+        const doc = await getOfficerProfileFromFirestoreByKey(key);
+        return res.json(doc ? [doc] : []);
+      }
+      const list = await listOfficerProfilesFromFirestore();
+      return res.json(list);
+    }
+
+    // fallback: read from local data.json
+    const map = await readOfficerProfilesFromDB();
+    if (orgIdQuery) {
+      const p = map[orgIdQuery] || null;
+      return res.json(p ? [p] : []);
+    }
+    if (orgQuery) {
+      const key = canonicalKeyForOrg(orgQuery);
+      const p = map[key] || null;
+      return res.json(p ? [p] : []);
+    }
+    // return all values
+    const vals = Object.keys(map).map(k => map[k]);
+    return res.json(vals);
+  } catch (err) {
+    console.error('GET /api/officer-profiles error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// GET /api/officer-profiles/:id
+app.get('/api/officer-profiles/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (firestore) {
+      const doc = await getOfficerProfileFromFirestoreByKey(id);
+      if (!doc) return res.status(404).json({ error: 'not found' });
+      return res.json(doc);
+    }
+    const map = await readOfficerProfilesFromDB();
+    const profile = map[id] || map[canonicalKeyForOrg(id)] || null;
+    if (!profile) return res.status(404).json({ error: 'not found' });
+    return res.json(profile);
+  } catch (err) {
+    console.error('GET /api/officer-profiles/:id error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// POST /api/officer-profiles - upsert profile
+// Body: { org, orgId (optional), profile: { name: {surname,given,middle}, designation, year, college, department, program, photoURL, username } }
+// Requires authentication when Firebase admin is configured (verifyFirebaseToken). When admin not configured, endpoint still works (no auth).
+app.post('/api/officer-profiles', verifyFirebaseToken, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const org = body.org || null;
+    const orgId = body.orgId || null;
+    const profile = body.profile || body; // allow full profile in root
+    if (!org && !orgId) return res.status(400).json({ error: 'org or orgId is required' });
+
+    // Normalize key: prefer orgId as key else canonical org name
+    const key = orgId ? String(orgId) : canonicalKeyForOrg(org);
+
+    // Build profile object to persist
+    const profileObj = Object.assign({}, profile, {
+      org: org || profile.org || '',
+      orgId: orgId || profile.orgId || null,
+      updatedAt: new Date().toISOString()
+    });
+
+    // Persist to local data.json map (non-blocking for firestore path)
+    try {
+      const map = await readOfficerProfilesFromDB();
+      map[key] = Object.assign({}, map[key] || {}, profileObj);
+      await writeOfficerProfilesToDB(map);
+    } catch (e) {
+      console.warn('Failed to write officer profile to local DB:', e);
+    }
+
+    // Persist to Firestore if configured
+    if (firestore) {
+      try {
+        // Use orgId as document id when present else canonical org name
+        const docId = key;
+        await upsertOfficerProfileToFirestore(docId, profileObj);
+      } catch (e) {
+        console.warn('Failed to persist officer profile to Firestore:', e);
+      }
+    }
+
+    // Signal other tabs/clients via localStorage key if running in same browser (server can't set localStorage on clients)
+    // Client code already writes orgsLastUpdated when saving locally; keep that behavior on client.
+    return res.json(map[key] || profileObj);
+  } catch (err) {
+    console.error('POST /api/officer-profiles error:', err);
     return res.status(500).json({ error: 'Server error' });
   }
 });
