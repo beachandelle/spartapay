@@ -44,7 +44,7 @@ if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 // Local DB fallback file (now includes payments, events AND organizations and officerProfiles)
 const DB_FILE = path.join(__dirname, 'data.json');
-if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ payments: [], events: [], organizations: [], officerProfiles: {} }, null, 2));
+if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ payments: [], events: [], organizations: [], officerProfiles: {}, users: {} }, null, 2));
 
 function readDB() {
   try {
@@ -54,10 +54,11 @@ function readDB() {
     if (!db.events) db.events = [];
     if (!db.organizations) db.organizations = [];
     if (!db.officerProfiles) db.officerProfiles = {};
+    if (!db.users) db.users = {};
     return db;
   } catch (e) {
     console.warn('readDB error:', e);
-    return { payments: [], events: [], organizations: [], officerProfiles: {} };
+    return { payments: [], events: [], organizations: [], officerProfiles: {}, users: {} };
   }
 }
 function writeDB(db) {
@@ -66,6 +67,7 @@ function writeDB(db) {
   if (!db.events) db.events = [];
   if (!db.organizations) db.organizations = [];
   if (!db.officerProfiles) db.officerProfiles = {};
+  if (!db.users) db.users = {};
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
@@ -247,6 +249,27 @@ async function getOrgById(orgId) {
   }
   const db = readDB();
   return (db.organizations || []).find(o => o.id === orgId || o.name === orgId) || null;
+}
+
+// Helper: get user by uid (Firestore preferred, fallback to local data.json)
+async function getUserByUid(uid) {
+  if (!uid) return null;
+  if (firestore) {
+    try {
+      const doc = await firestore.collection('users').doc(String(uid)).get();
+      if (doc.exists) return doc.data();
+    } catch (e) {
+      console.warn('getUserByUid firestore error:', e);
+    }
+  }
+  // fallback to local DB
+  try {
+    const db = readDB();
+    if (db.users && db.users[uid]) return db.users[uid];
+  } catch (e) {
+    // ignore
+  }
+  return null;
 }
 
 // ----------------------
@@ -652,6 +675,51 @@ app.post('/api/officer-profiles', verifyFirebaseToken, async (req, res) => {
     return res.json(map[key] || profileObj);
   } catch (err) {
     console.error('POST /api/officer-profiles error:', err);
+    return res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ----------------------
+// New: GET /api/my-profile - returns the authenticated user's stored profile (users/{uid}.profile)
+// Requires verifyFirebaseToken. Falls back to local data.json users map when Firestore not configured.
+// Response: { uid, profile, role }
+// ----------------------
+app.get('/api/my-profile', verifyFirebaseToken, async (req, res) => {
+  try {
+    const uid = req.firebaseUser && req.firebaseUser.uid;
+    if (!uid) return res.status(401).json({ error: 'not authenticated' });
+
+    if (firestore) {
+      try {
+        const doc = await firestore.collection('users').doc(uid).get();
+        if (doc.exists) {
+          const data = doc.data();
+          const profile = data.profile || null;
+          const role = data.role || null;
+          return res.json({ uid, profile, role });
+        }
+      } catch (e) {
+        console.warn('GET /api/my-profile firestore read failed:', e);
+        // fallthrough to local fallback
+      }
+    }
+
+    // Local fallback: read from data.json users map if present
+    try {
+      const db = readDB();
+      if (db.users && db.users[uid]) {
+        const userRec = db.users[uid];
+        const profile = userRec.profile || userRec || null;
+        const role = userRec.role || null;
+        return res.json({ uid, profile, role });
+      }
+    } catch (e) {
+      // ignore and return empty
+    }
+
+    return res.json({ uid, profile: null, role: null });
+  } catch (err) {
+    console.error('GET /api/my-profile error:', err);
     return res.status(500).json({ error: 'Server error' });
   }
 });
