@@ -233,6 +233,73 @@ async function upsertOrganizationByName(orgName, { displayName = null, logoUrl =
 }
 
 // ----------------------
+// Helper: Firestore-backed read helpers (used when Firestore is configured)
+// ----------------------
+async function listEventsFirestore(orgFilter = null) {
+  if (!firestore) return null;
+  try {
+    let q = firestore.collection('events');
+    if (orgFilter) q = q.where('org', '==', orgFilter);
+    const snap = await q.get();
+    return snap.docs.map(d => d.data());
+  } catch (err) {
+    console.warn('listEventsFirestore failed:', err);
+    return null;
+  }
+}
+
+async function getEventFirestoreById(id) {
+  if (!firestore) return null;
+  try {
+    const doc = await firestore.collection('events').doc(id).get();
+    return doc.exists ? doc.data() : null;
+  } catch (err) {
+    console.warn('getEventFirestoreById failed:', err);
+    return null;
+  }
+}
+
+async function listOrgsFirestore() {
+  if (!firestore) return null;
+  try {
+    const snap = await firestore.collection('organizations').get();
+    return snap.docs.map(d => d.data());
+  } catch (err) {
+    console.warn('listOrgsFirestore failed:', err);
+    return null;
+  }
+}
+
+async function listPaymentsFirestore() {
+  if (!firestore) return null;
+  try {
+    const snap = await firestore.collection('payments').get();
+    return snap.docs.map(d => d.data());
+  } catch (err) {
+    console.warn('listPaymentsFirestore failed:', err);
+    return null;
+  }
+}
+
+async function listPaymentsForUserFirestore(uid, email) {
+  if (!firestore) return null;
+  try {
+    if (uid) {
+      const snap = await firestore.collection('payments').where('submittedByUid', '==', uid).get();
+      return snap.docs.map(d => d.data());
+    }
+    if (email) {
+      const snap = await firestore.collection('payments').where('submittedByEmail', '==', email).get();
+      return snap.docs.map(d => d.data());
+    }
+    return [];
+  } catch (err) {
+    console.warn('listPaymentsForUserFirestore failed:', err);
+    return null;
+  }
+}
+
+// ----------------------
 // Organizations endpoints (NEW)
 // - GET /api/orgs
 // - GET /api/orgs/:id
@@ -246,6 +313,12 @@ async function upsertOrganizationByName(orgName, { displayName = null, logoUrl =
 // GET /api/orgs - return list of organizations
 app.get('/api/orgs', async (req, res) => {
   try {
+    if (firestore) {
+      const orgs = await listOrgsFirestore();
+      if (Array.isArray(orgs)) return res.json(orgs);
+      // else fallthrough to local
+    }
+
     const db = readDB();
     let orgs = (db.organizations || []).map(o => ({ ...o }));
     // If no explicit organizations exist, derive from events (helpful fallback)
@@ -263,6 +336,14 @@ app.get('/api/orgs', async (req, res) => {
 // GET /api/orgs/:id - get single org
 app.get('/api/orgs/:id', async (req, res) => {
   try {
+    if (firestore) {
+      try {
+        const doc = await firestore.collection('organizations').doc(req.params.id).get();
+        if (doc.exists) return res.json(doc.data());
+      } catch (e) {
+        // ignore and fallback
+      }
+    }
     const db = readDB();
     const org = (db.organizations || []).find(o => o.id === req.params.id || o.name === req.params.id);
     if (!org) return res.status(404).json({ error: 'not found' });
@@ -350,17 +431,25 @@ app.delete('/api/orgs/:id', async (req, res) => {
 // - PUT /api/events/:id (multipart support added)
 // - DELETE /api/events/:id
 // These use the local data.json fallback (db.events) and also persist to Firestore if configured.
+// When Firestore is configured, GET endpoints will read from Firestore.
 // ----------------------
 
 // GET /api/events - list all events (server-authoritative); supports optional org filter
 app.get('/api/events', async (req, res) => {
   try {
+    const orgFilter = req.query.org ? String(req.query.org) : null;
+
+    if (firestore) {
+      const events = await listEventsFirestore(orgFilter);
+      if (Array.isArray(events)) {
+        return res.json(events);
+      }
+      // else fallthrough to local DB
+    }
+
     const db = readDB();
     let events = (db.events || []).map(e => ({ ...e }));
-    const orgFilter = req.query.org ? String(req.query.org) : null;
-    if (orgFilter) {
-      events = events.filter(ev => ev && ev.org === orgFilter);
-    }
+    if (orgFilter) events = events.filter(ev => ev && ev.org === orgFilter);
     // return a shallow clone to avoid accidental mutation
     res.json(events);
   } catch (err) {
@@ -372,6 +461,12 @@ app.get('/api/events', async (req, res) => {
 // GET /api/events/:id - single event
 app.get('/api/events/:id', async (req, res) => {
   try {
+    if (firestore) {
+      const ev = await getEventFirestoreById(req.params.id);
+      if (ev) return res.json(ev);
+      // else fallthrough to local
+    }
+
     const db = readDB();
     const ev = (db.events || []).find(x => x.id === req.params.id);
     if (!ev) return res.status(404).json({ error: 'not found' });
@@ -602,6 +697,26 @@ app.delete('/api/events/:id', async (req, res) => {
 // GET /api/payments - list all payments (inject signed URLs when possible)
 app.get('/api/payments', async (req, res) => {
   try {
+    if (firestore) {
+      const payments = await listPaymentsFirestore();
+      if (Array.isArray(payments)) {
+        if (supabase) {
+          await Promise.all(payments.map(async (p) => {
+            if (p.proofObjectPath) {
+              try {
+                const url = await makeFileUrl(p.proofObjectPath);
+                if (url) p.proofFile = url;
+              } catch (err) {
+                console.warn('Failed to create signed URL for', p.proofObjectPath, err && err.message ? err.message : err);
+              }
+            }
+          }));
+        }
+        return res.json(payments);
+      }
+      // else fallthrough
+    }
+
     const db = readDB();
     const payments = db.payments.map(p => ({ ...p })); // shallow clone
 
@@ -630,6 +745,27 @@ app.get('/api/my-payments', verifyFirebaseToken, async (req, res) => {
   try {
     const uid = req.firebaseUser && req.firebaseUser.uid;
     const email = req.firebaseUser && req.firebaseUser.email;
+
+    if (firestore) {
+      const list = await listPaymentsForUserFirestore(uid, email);
+      if (Array.isArray(list)) {
+        if (supabase) {
+          await Promise.all(list.map(async (p) => {
+            if (p.proofObjectPath) {
+              try {
+                const url = await makeFileUrl(p.proofObjectPath);
+                if (url) p.proofFile = url;
+              } catch (err) {
+                console.warn('Failed to create signed URL for', p.proofObjectPath, err && err.message ? err.message : err);
+              }
+            }
+          }));
+        }
+        return res.json(list);
+      }
+      // else fallthrough
+    }
+
     const db = readDB();
     let list = db.payments.filter(p => (p.submittedByUid && p.submittedByUid === uid) || (p.submittedByEmail && p.submittedByEmail === email));
 
@@ -767,8 +903,21 @@ app.post('/api/payments', verifyFirebaseToken, upload.single('proof'), async (re
 // GET /api/payments/:id/proof-url - return a fresh signed URL for a given payment (auth + authorization)
 app.get('/api/payments/:id/proof-url', verifyFirebaseToken, async (req, res) => {
   try {
-    const db = readDB();
-    const payment = db.payments.find(p => p.id === req.params.id);
+    // Prefer Firestore lookup when available
+    let payment = null;
+    if (firestore) {
+      try {
+        const doc = await firestore.collection('payments').doc(req.params.id).get();
+        if (doc.exists) payment = doc.data();
+      } catch (e) {
+        // ignore and fallback to local
+      }
+    }
+    if (!payment) {
+      const db = readDB();
+      payment = db.payments.find(p => p.id === req.params.id);
+    }
+
     if (!payment) return res.status(404).json({ error: 'not found' });
     if (!payment.proofObjectPath) return res.status(404).json({ error: 'no proof object path' });
 
