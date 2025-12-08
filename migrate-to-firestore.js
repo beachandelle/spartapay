@@ -86,8 +86,9 @@ async function main() {
   const payments = Array.isArray(raw.payments) ? raw.payments : [];
   const events = Array.isArray(raw.events) ? raw.events : [];
   const organizations = Array.isArray(raw.organizations) ? raw.organizations : [];
+  const officerProfilesLocal = raw.officerProfiles && typeof raw.officerProfiles === 'object' ? raw.officerProfiles : {};
 
-  console.log(`Loaded data.json: ${events.length} events, ${payments.length} payments, ${organizations.length} organizations (existing).`);
+  console.log(`Loaded data.json: ${events.length} events, ${payments.length} payments, ${organizations.length} organizations (existing), ${Object.keys(officerProfilesLocal).length} officerProfiles (local).`);
   if (dryRun) console.log('Running in dry-run mode — no writes to Firestore or data.json will be performed.');
 
   // Build canonical org map from existing organizations (local) and from events fallback
@@ -246,6 +247,87 @@ async function main() {
 
   console.log(`Events: ${eventsUpdated} events will be updated with orgId (dryRun=${dryRun}).`);
 
+  // -----------------------
+  // OfficerProfiles migration:
+  // - read raw.officerProfiles (object keyed by orgName or orgId)
+  // - map each to a canonical Firestore docId: prefer mapped orgId (from canonToOrgId) else use canonical org name
+  // - upsert to Firestore collection 'officerProfiles' (doc id = chosen key)
+  // - build newOfficerProfiles map keyed by chosen doc ids for writing back into data.json
+  // -----------------------
+  const localOfficerKeys = Object.keys(officerProfilesLocal || {});
+  const officerProfilesPlan = {
+    total: localOfficerKeys.length,
+    mapped: 0,
+    upsertsDry: [],
+    upsertsReal: [],
+    failures: []
+  };
+
+  const newOfficerProfilesMap = {}; // will be written to data.json (keyed by docId)
+
+  for (const localKey of localOfficerKeys) {
+    const profile = officerProfilesLocal[localKey] || {};
+    // profile may contain org, orgId, etc.
+    const profileOrgName = profile.org || localKey || '';
+    const canon = canonicalizeName(profileOrgName);
+    // Prefer orgId from profile, else mapping from canonToOrgId
+    const mappedOrgId = (profile.orgId && String(profile.orgId)) ? String(profile.orgId) : (canon ? (canonToOrgId.get(canon) || null) : null);
+    // choose doc id: prefer orgId else canonical name (fallback to localKey)
+    let docId = mappedOrgId || (canon ? canon : String(localKey));
+    // Ensure docId is non-empty; if empty and firestore available, generate an id
+    if (!docId) {
+      try {
+        docId = firestore.collection('officerProfiles').doc().id;
+      } catch (e) {
+        docId = String(localKey || Date.now());
+      }
+    }
+
+    // Merge profile with canonical fields we can determine
+    const mergedProfile = Object.assign({}, profile, {
+      org: profile.org || (mappedOrgId ? profileOrgName : profile.org) || profileOrgName || '',
+      orgId: mappedOrgId || profile.orgId || null,
+      updatedAt: new Date().toISOString()
+    });
+
+    if (dryRun) {
+      officerProfilesPlan.upsertsDry.push({ localKey, docId, mergedProfile });
+      officerProfilesPlan.mapped++;
+      // prepare newOfficerProfilesMap in dry-run so summary is visible
+      newOfficerProfilesMap[docId] = mergedProfile;
+      continue;
+    }
+
+    // Real run: attempt Firestore upsert
+    try {
+      await firestore.collection('officerProfiles').doc(String(docId)).set(mergedProfile, { merge: true });
+      officerProfilesPlan.upsertsReal.push({ localKey, docId });
+      newOfficerProfilesMap[docId] = mergedProfile;
+      officerProfilesPlan.mapped++;
+    } catch (err) {
+      console.error('Failed to upsert officer profile to Firestore for', localKey, '->', docId, err);
+      officerProfilesPlan.failures.push({ localKey, docId, error: String(err) });
+      // still write to newOfficerProfilesMap locally so we don't lose the profile in data.json
+      newOfficerProfilesMap[docId] = mergedProfile;
+    }
+  }
+
+  if (dryRun) {
+    console.log('OfficerProfiles dry-run plan:');
+    console.log(`  total local profiles: ${officerProfilesPlan.total}`);
+    console.log(`  mapped profiles: ${officerProfilesPlan.mapped}`);
+    officerProfilesPlan.upsertsDry.forEach(p => {
+      console.log(`  [DRY] localKey="${p.localKey}" -> docId="${p.docId}"`);
+    });
+  } else {
+    console.log(`OfficerProfiles: upserted ${officerProfilesPlan.upsertsReal.length} profiles to Firestore; ${officerProfilesPlan.failures.length} failures.`);
+    if (officerProfilesPlan.failures.length > 0) {
+      officerProfilesPlan.failures.forEach(f => {
+        console.warn('  failure:', f.localKey, '->', f.docId, f.error);
+      });
+    }
+  }
+
   // Payments: no changes to org mapping currently, but we will write payments to Firestore as before.
   // Backup local data.json unless disabled
   if (!dryRun && !noBackup) {
@@ -262,7 +344,7 @@ async function main() {
     console.log('--no-backup specified: not creating a backup.');
   }
 
-  // If not dry-run, write updated local data.json (events updated and organizations canonicalized)
+  // If not dry-run, write updated local data.json (events updated, organizations canonicalized, officerProfiles normalized)
   if (!dryRun) {
     try {
       // Build canonical organizations array from canonToOrgId and canonicalEntries
@@ -278,10 +360,11 @@ async function main() {
 
       const out = Object.assign({}, raw, {
         events: updatedEventsForWrite,
-        organizations: orgsOut
+        organizations: orgsOut,
+        officerProfiles: newOfficerProfilesMap
       });
       fs.writeFileSync(DB_FILE, JSON.stringify(out, null, 2));
-      console.log('Updated local data.json with orgId on events and canonical organizations.');
+      console.log('Updated local data.json with orgId on events, canonical organizations, and normalized officerProfiles.');
     } catch (err) {
       console.error('Failed to write updated data.json:', err);
     }
@@ -296,6 +379,7 @@ async function main() {
     console.log(`  Organizations to reuse: ${reusedOrgs.length}`);
     console.log(`  Events to update with orgId: ${eventsUpdated} / ${events.length}`);
     console.log(`  Payments to write: ${payments.length}`);
+    console.log(`  OfficerProfiles to upsert: ${officerProfilesPlan.mapped}`);
     process.exit(0);
   }
 
