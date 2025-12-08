@@ -166,7 +166,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (lastUser) {
       for (const [k, v] of Object.entries(profilesMap)) {
         if (v && v.username && v.username === lastUser) {
-          localStorage.setItem("officerOrg", k);
+          try { localStorage.setItem("officerOrg", k); } catch (e) {}
           return k;
         }
       }
@@ -175,10 +175,23 @@ document.addEventListener("DOMContentLoaded", () => {
     // If there is exactly one saved org, use it (convenience)
     const keys = Object.keys(profilesMap || {});
     if (keys.length === 1) {
-      localStorage.setItem("officerOrg", keys[0]);
+      try { localStorage.setItem("officerOrg", keys[0]); } catch (e) {}
       return keys[0];
     }
 
+    return "";
+  }
+
+  function getCurrentOrgId() {
+    // Prefer explicit officerOrgId if present
+    const storedId = localStorage.getItem("officerOrgId") || "";
+    if (storedId) return storedId;
+
+    // Otherwise try to read from profiles map
+    const org = getCurrentOrg();
+    if (!org) return "";
+    const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
+    if (profilesMap && profilesMap[org] && profilesMap[org].orgId) return profilesMap[org].orgId;
     return "";
   }
 
@@ -310,7 +323,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Save per-org map and also write single-key fallback (only for convenience)
     profilesMap[newOrg] = Object.assign({}, profilesMap[newOrg] || {}, profileObj);
     localStorage.setItem("officerProfiles", JSON.stringify(profilesMap));
-    localStorage.setItem("officerOrg", newOrg);
+    try { localStorage.setItem("officerOrg", newOrg); } catch (e) {}
     localStorage.setItem("officerProfile", JSON.stringify(profileObj)); // single-key fallback
 
     // Persist lastOfficerUsername if username present
@@ -329,6 +342,7 @@ document.addEventListener("DOMContentLoaded", () => {
           pm[newOrg] = pm[newOrg] || {};
           pm[newOrg].orgId = org.id;
           localStorage.setItem("officerProfiles", JSON.stringify(pm));
+          try { localStorage.setItem('officerOrgId', org.id); } catch(e) {}
         }
         // signal other tabs (same browser) to refresh org lists
         try {
@@ -431,7 +445,7 @@ document.addEventListener("DOMContentLoaded", () => {
         <div class="stat-label">Total students who paid</div>
         <div id="countPaid" class="stat-number paid">0</div>
       </div>
-      <div class="stat-card stat-card--center">
+      <div class="stat-card	stat-card--center">
         <div class="stat-label">Total approved transactions</div>
         <div id="countApproved" class="stat-number approved">0</div>
       </div>
@@ -454,7 +468,23 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!res.ok) throw new Error(`Status ${res.status}`);
       const orgs = await res.json();
       if (!Array.isArray(orgs)) return [];
-      return orgs;
+      // normalize to {id, name, displayName}
+      const normalized = orgs.map(o => {
+        if (typeof o === 'string') return { id: o, name: o, displayName: o };
+        return { id: o.id || o.name || o.displayName || String(o), name: o.name || o.displayName || o.id || String(o), displayName: o.displayName || o.name || o.id || String(o) };
+      });
+      // client-side dedupe by canonical name (safe-guard)
+      const map = new Map();
+      normalized.forEach(o => {
+        const canon = String(o.name || '').trim().toLowerCase();
+        if (!canon) return;
+        if (!map.has(canon)) map.set(canon, o);
+        else {
+          const existing = map.get(canon);
+          if ((!existing.id || existing.id === existing.name) && o.id) map.set(canon, o);
+        }
+      });
+      return Array.from(map.values());
     } catch (err) {
       try {
         const localEvents = JSON.parse(localStorage.getItem("events") || "[]");
@@ -466,10 +496,12 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  async function fetchEventsForOrg(orgName) {
-    if (!orgName) return [];
+  // Prefer fetching events by orgId when available (server supports ?orgId=)
+  async function fetchEventsForOrg(orgName, orgId = null) {
+    if (!orgName && !orgId) return [];
     try {
-      const res = await fetch(`${SERVER_BASE}/api/events?org=${encodeURIComponent(orgName)}`);
+      const url = orgId ? `${SERVER_BASE}/api/events?orgId=${encodeURIComponent(orgId)}` : `${SERVER_BASE}/api/events?org=${encodeURIComponent(orgName)}`;
+      const res = await fetch(url);
       if (!res.ok) throw new Error(`Status ${res.status}`);
       const events = await res.json();
       if (!Array.isArray(events)) return [];
@@ -477,6 +509,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (err) {
       try {
         const local = JSON.parse(localStorage.getItem("events") || "[]");
+        if (orgId) return local.filter(e => e.orgId === orgId || e.org === orgName);
         return local.filter(e => e.org === orgName);
       } catch (e) {
         return [];
@@ -512,24 +545,27 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!eventTableBody) return;
     eventTableBody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:18px">Loading events...</td></tr>`;
     const officerOrg = getCurrentOrg();
+    const officerOrgId = getCurrentOrgId();
 
     // Ensure org selection exists if missing: try to auto-set using server orgs
     if (!officerOrg) {
       try {
         const orgs = await fetchOrgsFromServer();
         if (orgs && orgs.length === 1) {
-          localStorage.setItem('officerOrg', orgs[0].name || orgs[0].displayName || orgs[0].id);
+          const o = orgs[0];
+          try { localStorage.setItem('officerOrg', o.name || o.displayName || o.id); } catch(e){}
+          if (o.id) try { localStorage.setItem('officerOrgId', o.id); } catch(e){}
         }
       } catch (e) { /* ignore */ }
     }
 
-    // Attempt to fetch server events for this org
+    // Attempt to fetch server events for this org (prefer orgId)
     let serverEvents = null;
-    if (officerOrg) {
+    if (officerOrg || officerOrgId) {
       try {
-        serverEvents = await fetchEventsForOrg(officerOrg);
+        serverEvents = await fetchEventsForOrg(officerOrg, officerOrgId);
       } catch (e) {
-        console.debug('fetchEventsForOrg failed:', e);
+        console.debug('fetchEventsForOrg failed (orgId or name):', e);
         serverEvents = null;
       }
     }
@@ -549,25 +585,26 @@ document.addEventListener("DOMContentLoaded", () => {
       // Update localStorage mirror: remove any local items that match server ids or name+org duplicates,
       // then insert server events so localStorage reflects server state (helps offline fallback later)
       try {
-        // Build map of server events by id and by name+org key
         const serverById = new Set(serverEvents.map(e => e.id).filter(Boolean));
         const serverByKey = new Set(serverEvents.map(e => `${(e.org||'').trim()}:::${(e.name||'').trim()}`));
-        // Filter out local events that match server items
         const filteredLocal = localEvents.filter(le => {
           if (le.id && serverById.has(le.id)) return false;
           const key = `${(le.org||'').trim()}:::${(le.name||'').trim()}`;
           if (serverByKey.has(key)) return false;
           return true;
         });
-        // Mirror: prepend server events to filteredLocal (so localStorage contains server copies + any offline-only local events)
         const mirrored = serverEvents.concat(filteredLocal);
         localStorage.setItem("events", JSON.stringify(mirrored));
       } catch (e) {
         console.warn('Failed to mirror server events to localStorage:', e);
       }
     } else {
-      // fallback to local events filtered by org
-      useEvents = localEvents.filter(ev => ev.org === officerOrg);
+      // fallback to local events filtered by org or orgId
+      useEvents = localEvents.filter(ev => {
+        if (officerOrgId && ev.orgId) return ev.orgId === officerOrgId;
+        if (officerOrg) return ev.org === officerOrg;
+        return false;
+      });
       source = 'local';
     }
 
@@ -692,18 +729,10 @@ document.addEventListener("DOMContentLoaded", () => {
               const txt = await res.text().catch(()=> '');
               throw new Error(txt || `Status ${res.status}`);
             }
-            // remove any matching local mirror entries (by id and by name+org)
+            // remove any matching local mirror entries (by id)
             try {
               const locals = JSON.parse(localStorage.getItem("events") || "[]");
-              const filtered = (locals || []).filter(l => {
-                if (l.id && l.id === id) return false;
-                if ((l.org || '') && (l.name || '')) {
-                  const keyLocal = `${(l.org||'').trim()}:::${(l.name||'').trim()}`;
-                  // We don't have server name here, so keep general: remove local entries with same id already handled.
-                  // Leave other local-only items.
-                }
-                return true;
-              });
+              const filtered = (locals || []).filter(l => !(l.id && l.id === id));
               localStorage.setItem("events", JSON.stringify(filtered));
             } catch (e) { console.warn('Failed to clean local mirror after server delete:', e); }
 
@@ -1290,6 +1319,7 @@ document.addEventListener("DOMContentLoaded", () => {
         deadline: eventDeadlineInput ? eventDeadlineInput.value : "",
         status: "Open",
         org: getCurrentOrg(),
+        orgId: getCurrentOrgId(),
         receiver: {
           number: receiverNumberInput ? receiverNumberInput.value : "",
           name: receiverNameInput ? receiverNameInput.value : "",
@@ -1304,7 +1334,8 @@ document.addEventListener("DOMContentLoaded", () => {
           if (newEventData.name) form.append('name', newEventData.name);
           form.append('fee', String(newEventData.fee || 0));
           if (newEventData.deadline) form.append('deadline', newEventData.deadline);
-          if (newEventData.org) form.append('org', newEventData.org);
+          if (newEventData.orgId) form.append('orgId', newEventData.orgId);
+          else if (newEventData.org) form.append('org', newEventData.org);
           // Include receiver metadata (without qr)
           const receiverMeta = Object.assign({}, newEventData.receiver);
           delete receiverMeta.qr;
@@ -1366,7 +1397,8 @@ document.addEventListener("DOMContentLoaded", () => {
         form.append('name', newEventData.name || '');
         form.append('fee', String(newEventData.fee || 0));
         if (newEventData.deadline) form.append('deadline', newEventData.deadline);
-        if (newEventData.org) form.append('org', newEventData.org);
+        if (newEventData.orgId) form.append('orgId', newEventData.orgId);
+        else if (newEventData.org) form.append('org', newEventData.org);
 
         // Prepare receiver metadata and remove qr (we send qr as file)
         const receiverMeta = Object.assign({}, newEventData.receiver);
@@ -1427,10 +1459,14 @@ document.addEventListener("DOMContentLoaded", () => {
         // Fallback: preserve existing behavior (localStorage)
         if (editingEventIndex !== null && editingEventIndex !== undefined && editingEventIndex !== -1) {
           const allEvents = JSON.parse(localStorage.getItem("events") || "[]");
+          // if editing local, preserve orgId if present
+          if (allEvents[editingEventIndex] && newEventData.orgId) allEvents[editingEventIndex].orgId = newEventData.orgId;
           allEvents[editingEventIndex] = newEventData;
           localStorage.setItem("events", JSON.stringify(allEvents));
           editingEventIndex = null;
         } else {
+          // attach orgId to local event for future canonical mapping
+          if (newEventData.orgId) newEventData.orgId = newEventData.orgId;
           events.push(newEventData);
           localStorage.setItem("events", JSON.stringify(events));
         }
@@ -1455,7 +1491,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // storage events to sync across tabs
   window.addEventListener("storage", (ev) => {
     if (!ev.key) return;
-    if (["paymentHistory","officerOrg","officerProfile","officerProfiles","events","orgsLastUpdated"].includes(ev.key)) {
+    if (["paymentHistory","officerOrg","officerProfile","officerProfiles","events","orgsLastUpdated","officerOrgId"].includes(ev.key)) {
       loadProfile();
       loadEvents();
       if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
