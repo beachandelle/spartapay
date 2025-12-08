@@ -248,6 +248,73 @@ async function main() {
   console.log(`Events: ${eventsUpdated} events will be updated with orgId (dryRun=${dryRun}).`);
 
   // -----------------------
+  // Build event lookup to help map legacy payments to eventId
+  // -----------------------
+  const eventLookupByOrgAndName = new Map(); // key = `${orgId||canonOrgName}:::${eventName}` -> eventId
+  updatedEventsForWrite.forEach(ev => {
+    const evName = ev && ev.name ? ev.name : '';
+    if (!evName) return;
+    if (ev.orgId) {
+      eventLookupByOrgAndName.set(`${ev.orgId}:::${evName}`, ev.id);
+    }
+    if (ev.org) {
+      const canonOrg = canonicalizeName(ev.org);
+      if (canonOrg) eventLookupByOrgAndName.set(`${canonOrg}:::${evName}`, ev.id);
+    }
+  });
+
+  // -----------------------
+  // Payments mapping: attempt to set orgId and eventId on legacy payments when possible
+  // - prefer existing payment.orgId/eventId
+  // - if missing orgId, try map from canonical org name using canonToOrgId
+  // - if missing eventId, try find event by (orgId,eventName) or (canonOrgName,eventName)
+  // This improves later filtering and prevents split payments for duplicate names.
+  // -----------------------
+  let paymentsMappedCount = 0;
+  const paymentsToWrite = [];
+  for (const p of payments) {
+    const copy = Object.assign({}, p);
+    const payOrgName = p.org || '';
+    const payCanon = canonicalizeName(payOrgName);
+    // prefer existing orgId in payment
+    if (!copy.orgId) {
+      const mapped = (payCanon && canonToOrgId.has(payCanon)) ? canonToOrgId.get(payCanon) : null;
+      if (mapped) {
+        copy.orgId = mapped;
+        paymentsMappedCount++;
+      }
+    }
+    // attempt to map eventId
+    if (!copy.eventId) {
+      const evName = p.event || p.name || (p.purpose || '').split('|').pop()?.trim() || '';
+      if (evName) {
+        let found = false;
+        if (copy.orgId) {
+          const key = `${copy.orgId}:::${evName}`;
+          if (eventLookupByOrgAndName.has(key)) {
+            copy.eventId = eventLookupByOrgAndName.get(key);
+            paymentsMappedCount++;
+            found = true;
+          }
+        }
+        if (!found && payCanon) {
+          const key2 = `${payCanon}:::${evName}`;
+          if (eventLookupByOrgAndName.has(key2)) {
+            copy.eventId = eventLookupByOrgAndName.get(key2);
+            paymentsMappedCount++;
+            found = true;
+          }
+        }
+      }
+    }
+    paymentsToWrite.push(copy);
+  }
+
+  if (dryRun) {
+    console.log(`Payments mapping (dry-run): ${paymentsMappedCount} payments would be updated with orgId/eventId when possible.`);
+  }
+
+  // -----------------------
   // OfficerProfiles migration:
   // - read raw.officerProfiles (object keyed by orgName or orgId)
   // - map each to a canonical Firestore docId: prefer mapped orgId (from canonToOrgId) else use canonical org name
@@ -379,6 +446,7 @@ async function main() {
     console.log(`  Organizations to reuse: ${reusedOrgs.length}`);
     console.log(`  Events to update with orgId: ${eventsUpdated} / ${events.length}`);
     console.log(`  Payments to write: ${payments.length}`);
+    console.log(`  Payments that would be mapped with orgId/eventId: ${paymentsMappedCount}`);
     console.log(`  OfficerProfiles to upsert: ${officerProfilesPlan.mapped}`);
     process.exit(0);
   }
@@ -397,14 +465,16 @@ async function main() {
 
   // Payments
   console.log('Writing payments to Firestore (and per-user subcollections)...');
-  for (const p of payments) {
+  for (const p of paymentsToWrite) {
     const id = p.id || firestore.collection('payments').doc().id;
     try {
-      await firestore.collection('payments').doc(id).set(Object.assign({}, p, { id }), { merge: true });
+      // ensure an id field exists in the object being written
+      const toWrite = Object.assign({}, p, { id });
+      await firestore.collection('payments').doc(id).set(toWrite, { merge: true });
       console.log('Wrote payment', id, p.reference || p.name || '');
       if (p.submittedByUid) {
         try {
-          await firestore.collection('users').doc(p.submittedByUid).collection('payments').doc(id).set(Object.assign({}, p, { id }), { merge: true });
+          await firestore.collection('users').doc(p.submittedByUid).collection('payments').doc(id).set(toWrite, { merge: true });
         } catch (err) {
           console.warn('Failed to create per-user payment doc for', p.submittedByUid, id, err);
         }
