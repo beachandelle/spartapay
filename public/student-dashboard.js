@@ -136,7 +136,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // ----------------------
   // Server helpers
   // ----------------------
-  async function submitPaymentToServer({ org, orgId, event, amount, date, reference, file, studentMeta }) {
+  async function submitPaymentToServer({ org, orgId, event, eventId, amount, date, reference, file, studentMeta }) {
     const form = new FormData();
     form.append('name', event || 'payment');
     form.append('amount', amount || '0');
@@ -145,6 +145,9 @@ document.addEventListener("DOMContentLoaded", () => {
     // include orgId if provided (preferred)
     if (orgId) form.append('orgId', orgId);
     else if (org) form.append('org', org);
+    // include eventId when available and event name for readability
+    if (eventId) form.append('eventId', eventId);
+    if (event) form.append('event', event);
     if (file) form.append('proof', file, file.name);
     if (studentMeta) {
       Object.keys(studentMeta).forEach(k => {
@@ -522,8 +525,10 @@ document.addEventListener("DOMContentLoaded", () => {
         const d = document.createElement('option'); d.value=''; d.disabled=true; d.selected=true; d.textContent='-- Select Event --'; eventSel.appendChild(d);
         events.forEach(ev => {
           const opt = document.createElement('option');
-          opt.value = ev.name || 'Unnamed Event';
+          // Store event id in value (canonical). Use dataset.eventName for human-readable name.
+          opt.value = ev.id || (ev.name || ''); // prefer id for canonical mapping
           opt.textContent = ev.name || 'Unnamed Event';
+          opt.dataset.eventName = ev.name || opt.textContent;
           opt.dataset.fee = String(ev.fee !== undefined ? ev.fee : '');
           // store orgId for the event (if server provided)
           if (ev.orgId) opt.dataset.orgId = ev.orgId;
@@ -655,7 +660,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const orgId = els.orgSelect ? els.orgSelect.value : '';
       const eventOption = (els.eventSelect && els.eventSelect.selectedOptions && els.eventSelect.selectedOptions[0]) || null;
       if (!orgId || !eventOption || !eventOption.value) { alert('Please select both organization and event.'); return; }
-      const eventName = eventOption.value;
+      const eventName = eventOption.dataset.eventName || eventOption.textContent || eventOption.value;
       const amount = eventOption.dataset.fee || '';
       const orgDisplay = els.orgSelect.selectedOptions && els.orgSelect.selectedOptions[0] ? (els.orgSelect.selectedOptions[0].dataset.orgDisplay || els.orgSelect.selectedOptions[0].text) : '';
       if (els.paymentText) els.paymentText.textContent = `For ${orgDisplay} payment event "${eventName}", you are required to pay ₱${amount}.`;
@@ -699,7 +704,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const selectedOrgId = els.orgSelect ? els.orgSelect.value : '';
       const selectedOrgName = els.orgSelect ? (els.orgSelect.selectedOptions && els.orgSelect.selectedOptions[0] ? (els.orgSelect.selectedOptions[0].dataset.orgName || els.orgSelect.selectedOptions[0].text) : '') : '';
-      const selectedEvent = els.eventSelect ? els.eventSelect.value : '';
+      const selectedOption = els.eventSelect ? (els.eventSelect.selectedOptions && els.eventSelect.selectedOptions[0] ? els.eventSelect.selectedOptions[0] : null) : null;
+      const selectedEventId = selectedOption ? selectedOption.value : '';
+      const selectedEventName = selectedOption ? (selectedOption.dataset.eventName || selectedOption.textContent || selectedEventId) : '';
+
       const amountPaidEl = document.getElementById('amountPaid');
       const paymentDateEl = document.getElementById('paymentDate');
       const referenceNumberEl = document.getElementById('referenceNumber');
@@ -710,7 +718,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const referenceNumber = referenceNumberEl ? referenceNumberEl.value.trim() : '';
       const proofFile = proofFileEl && proofFileEl.files && proofFileEl.files[0];
 
-      if (!selectedOrgId || !selectedEvent || !amountPaid || Number(amountPaid) <= 0 || !referenceNumber) {
+      if (!selectedOrgId || !selectedEventId || !amountPaid || Number(amountPaid) <= 0 || !referenceNumber) {
         alert('Please fill required fields (org, event, amount, reference).');
         if (submitBtn) submitBtn.disabled = false;
         _isSubmittingPayment = false;
@@ -732,7 +740,8 @@ document.addEventListener("DOMContentLoaded", () => {
           const resp = await submitPaymentToServer({
             org: selectedOrgName,
             orgId: selectedOrgId,
-            event: selectedEvent,
+            event: selectedEventName,
+            eventId: selectedEventId,
             amount: amountPaid,
             date: paymentDate,
             reference: referenceNumber,
@@ -748,7 +757,8 @@ document.addEventListener("DOMContentLoaded", () => {
           history.push({
             org: selectedOrgName,
             orgId: selectedOrgId,
-            event: selectedEvent,
+            event: selectedEventName,
+            eventId: selectedEventId,
             amount: amountPaid,
             date: paymentDate || new Date().toISOString(),
             reference: referenceNumber || "",
