@@ -4,7 +4,7 @@
 // - Adds robust profile picture assignment and onerror fallback.
 // - Renders the confirmation text inside the dashboard (Done section) after payment and wires an "Okay" button to return to main page.
 // - Uses server endpoints where available and falls back to localStorage when needed.
-// - NEW: fetches organizations from /api/orgs and events from /api/events?orgId=... (server-preferred).
+// - NEW: fetches organizations from /api/orgs and events from /api/events?org=... (server-preferred).
 // - NEW: reacts to a small localStorage signal ('orgsLastUpdated') so open tabs refresh org list quicker.
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -128,15 +128,12 @@ document.addEventListener("DOMContentLoaded", () => {
   // ----------------------
   // Server helpers
   // ----------------------
-  async function submitPaymentToServer({ org, orgId, event, amount, date, reference, file, studentMeta }) {
+  async function submitPaymentToServer({ org, event, amount, date, reference, file, studentMeta }) {
     const form = new FormData();
     form.append('name', event || 'payment');
     form.append('amount', amount || '0');
-    form.append('purpose', `${org || ''} | ${event || ''}`);
+    form.append('purpose', `${org} | ${event}`);
     if (reference) form.append('reference', reference);
-    // include orgId if available (preferred)
-    if (orgId) form.append('orgId', orgId);
-    else if (org) form.append('org', org);
     if (file) form.append('proof', file, file.name);
     if (studentMeta) {
       Object.keys(studentMeta).forEach(k => {
@@ -166,30 +163,23 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!res.ok) throw new Error(`Status ${res.status}`);
       const orgs = await res.json();
       if (!Array.isArray(orgs)) return [];
-      // normalize: ensure { id, name, displayName }
-      return orgs.map(o => {
-        if (typeof o === 'string') return { id: o, name: o, displayName: o };
-        return { id: o.id || o.name || o.displayName || String(o), name: o.name || o.displayName || o.id || String(o), displayName: o.displayName || o.name || o.id || String(o) };
-      });
+      return orgs;
     } catch (err) {
       // fallback: derive orgs from localStorage events
       try {
         const localEvents = JSON.parse(localStorage.getItem("events") || "[]");
-        const set = Array.from(new Set(localEvents.map(e => e.org).filter(Boolean)));
-        return set.map(name => ({ id: name, name, displayName: name }));
+        const orgs = Array.from(new Set(localEvents.map(e => e.org).filter(Boolean))).map(name => ({ id: name, name, displayName: name }));
+        return orgs;
       } catch (e) {
         return [];
       }
     }
   }
 
-  // fetch events for an org by orgId (preferred) with fallback to localStorage
-  async function fetchEventsForOrgId(orgId, orgNameFallback = '') {
-    if (!orgId && !orgNameFallback) return [];
+  async function fetchEventsForOrg(orgName) {
+    if (!orgName) return [];
     try {
-      // Prefer orgId query if available
-      const query = orgId ? `orgId=${encodeURIComponent(orgId)}` : `org=${encodeURIComponent(orgNameFallback)}`;
-      const res = await fetch(`${SERVER_BASE}/api/events?${query}`);
+      const res = await fetch(`${SERVER_BASE}/api/events?org=${encodeURIComponent(orgName)}`);
       if (!res.ok) throw new Error(`Status ${res.status}`);
       const events = await res.json();
       if (!Array.isArray(events)) return [];
@@ -213,13 +203,10 @@ document.addEventListener("DOMContentLoaded", () => {
 
       return events;
     } catch (err) {
-      // fallback: localStorage by orgId or org name
+      // fallback: localStorage
       try {
         const localEvents = JSON.parse(localStorage.getItem("events") || "[]");
-        if (orgId) {
-          return localEvents.filter(e => e.orgId === orgId || (e.org && e.org === orgNameFallback));
-        }
-        return localEvents.filter(e => e.org === orgNameFallback);
+        return localEvents.filter(e => e.org === orgName);
       } catch (e) {
         return [];
       }
@@ -439,9 +426,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // Fetch orgs from server (fallback to localStorage derived orgs)
     const orgs = await fetchOrgsFromServer(); // returns array of {id,name,displayName,...} or derived list
+    // normalize to array of { id, name, displayName }
+    const normalizedOrgs = (orgs || []).map(o => {
+      if (typeof o === 'string') return { id: o, name: o, displayName: o };
+      return { id: o.id || o.name || o.displayName || String(o), name: o.name || o.displayName || o.id || String(o), displayName: o.displayName || o.name || o.id || String(o) };
+    });
 
     // If no orgs found, fallback to deriving orgs from localStorage events
-    let finalOrgs = (orgs || []);
+    let finalOrgs = normalizedOrgs;
     if (!finalOrgs || finalOrgs.length === 0) {
       try {
         const localEvents = JSON.parse(localStorage.getItem("events") || "[]");
@@ -452,50 +444,37 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    // Populate org select - use org.id as option.value (canonical)
+    // Populate org select
     orgSel.innerHTML = '';
     const defaultOpt = document.createElement('option'); defaultOpt.value=''; defaultOpt.disabled=true; defaultOpt.selected=true; defaultOpt.textContent='-- Select Organization --'; orgSel.appendChild(defaultOpt);
     finalOrgs.forEach(o => {
       const opt = document.createElement('option');
-      opt.value = o.id; // canonical id when available, otherwise name
+      opt.value = o.name;
       opt.textContent = o.displayName || o.name;
-      opt.dataset.orgName = o.name || o.displayName || '';
-      opt.dataset.orgDisplay = o.displayName || o.name || '';
+      opt.dataset.orgId = o.id || o.name;
       orgSel.appendChild(opt);
     });
 
-    // If there is a saved officerOrgId in localStorage, try to select it; else fall back to saved officerOrg (legacy)
-    const savedOrgId = localStorage.getItem('officerOrgId') || '';
-    const savedOrgNameLegacy = localStorage.getItem('officerOrg') || '';
-    if (savedOrgId) {
-      const match = Array.from(orgSel.options).find(opt => opt.value === savedOrgId);
+    // If there is a saved officerOrg in localStorage, try to select it
+    const savedOrg = localStorage.getItem('officerOrg') || '';
+    if (savedOrg) {
+      const match = Array.from(orgSel.options).find(opt => opt.value === savedOrg);
       if (match) {
-        orgSel.value = savedOrgId;
-      }
-    } else if (savedOrgNameLegacy) {
-      const match2 = Array.from(orgSel.options).find(opt => opt.dataset.orgName === savedOrgNameLegacy || opt.text === savedOrgNameLegacy);
-      if (match2) {
-        orgSel.value = match2.value;
-        // save canonical id for future
-        try { localStorage.setItem('officerOrgId', match2.value); } catch (e) { /* ignore */ }
+        orgSel.value = savedOrg;
+      } else {
+        // saved org not present in fetched list; keep default
       }
     }
 
     // Attach change listener (only once)
     if (!orgSel._listenerAttached) {
       orgSel.addEventListener('change', async () => {
-        const selectedOrgId = orgSel.value;
-        const selectedOrgName = orgSel.selectedOptions && orgSel.selectedOptions[0] ? (orgSel.selectedOptions[0].dataset.orgName || orgSel.selectedOptions[0].text) : '';
-        if (selectedOrgId) {
-          try { localStorage.setItem('officerOrgId', selectedOrgId); } catch (e) {}
-          try { localStorage.setItem('officerOrg', selectedOrgName); } catch (e) {}
-        } else {
-          localStorage.removeItem('officerOrgId');
-          localStorage.removeItem('officerOrg');
-        }
+        const selectedOrg = orgSel.value;
+        if (selectedOrg) localStorage.setItem('officerOrg', selectedOrg);
+        else localStorage.removeItem('officerOrg');
 
-        // Populate events for selected org (use orgId)
-        const events = await fetchEventsForOrgId(selectedOrgId, selectedOrgName);
+        // Populate events for selected org
+        const events = await fetchEventsForOrg(selectedOrg);
         eventSel.innerHTML = '';
         const d = document.createElement('option'); d.value=''; d.disabled=true; d.selected=true; d.textContent='-- Select Event --'; eventSel.appendChild(d);
         events.forEach(ev => {
@@ -527,8 +506,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } else {
       // If only one org exists, auto-select it
       if (finalOrgs.length === 1) {
-        orgSel.value = finalOrgs[0].id;
-        try { localStorage.setItem('officerOrgId', finalOrgs[0].id); localStorage.setItem('officerOrg', finalOrgs[0].name); } catch (e) {}
+        orgSel.value = finalOrgs[0].name;
         orgSel.dispatchEvent(new Event('change', { bubbles: true }));
       }
     }
@@ -627,13 +605,12 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (els.confirmDetailsBtn) {
     els.confirmDetailsBtn.addEventListener('click', () => {
-      const orgId = els.orgSelect ? els.orgSelect.value : '';
+      const org = els.orgSelect ? els.orgSelect.value : '';
       const eventOption = (els.eventSelect && els.eventSelect.selectedOptions && els.eventSelect.selectedOptions[0]) || null;
-      if (!orgId || !eventOption || !eventOption.value) { alert('Please select both organization and event.'); return; }
+      if (!org || !eventOption || !eventOption.value) { alert('Please select both organization and event.'); return; }
       const eventName = eventOption.value;
       const amount = eventOption.dataset.fee || '';
-      const orgDisplay = els.orgSelect.selectedOptions && els.orgSelect.selectedOptions[0] ? (els.orgSelect.selectedOptions[0].dataset.orgDisplay || els.orgSelect.selectedOptions[0].text) : '';
-      if (els.paymentText) els.paymentText.textContent = `For ${orgDisplay} payment event "${eventName}", you are required to pay ₱${amount}.`;
+      if (els.paymentText) els.paymentText.textContent = `For ${org} payment event "${eventName}", you are required to pay ₱${amount}.`;
       if (els.confirmDetailsSection) els.confirmDetailsSection.classList.remove('hidden');
       if (els.selectEventSection) els.selectEventSection.classList.add('hidden');
     });
@@ -672,8 +649,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const submitBtn = els.paymentForm.querySelector('button[type="submit"]');
       if (submitBtn) submitBtn.disabled = true;
 
-      const selectedOrgId = els.orgSelect ? els.orgSelect.value : '';
-      const selectedOrgName = els.orgSelect ? (els.orgSelect.selectedOptions && els.orgSelect.selectedOptions[0] ? (els.orgSelect.selectedOptions[0].dataset.orgName || els.orgSelect.selectedOptions[0].text) : '') : '';
+      const selectedOrg = els.orgSelect ? els.orgSelect.value : '';
       const selectedEvent = els.eventSelect ? els.eventSelect.value : '';
       const amountPaidEl = document.getElementById('amountPaid');
       const paymentDateEl = document.getElementById('paymentDate');
@@ -685,7 +661,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const referenceNumber = referenceNumberEl ? referenceNumberEl.value.trim() : '';
       const proofFile = proofFileEl && proofFileEl.files && proofFileEl.files[0];
 
-      if (!selectedOrgId || !selectedEvent || !amountPaid || Number(amountPaid) <= 0 || !referenceNumber) {
+      if (!selectedOrg || !selectedEvent || !amountPaid || Number(amountPaid) <= 0 || !referenceNumber) {
         alert('Please fill required fields (org, event, amount, reference).');
         if (submitBtn) submitBtn.disabled = false;
         _isSubmittingPayment = false;
@@ -705,8 +681,7 @@ document.addEventListener("DOMContentLoaded", () => {
       (async () => {
         try {
           const resp = await submitPaymentToServer({
-            org: selectedOrgName,
-            orgId: selectedOrgId,
+            org: selectedOrg,
             event: selectedEvent,
             amount: amountPaid,
             date: paymentDate,
@@ -721,8 +696,7 @@ document.addEventListener("DOMContentLoaded", () => {
           console.error("Payment upload failed, saving locally:", err);
           const history = JSON.parse(localStorage.getItem('paymentHistory') || "[]");
           history.push({
-            org: selectedOrgName,
-            orgId: selectedOrgId,
+            org: selectedOrg,
             event: selectedEvent,
             amount: amountPaid,
             date: paymentDate || new Date().toISOString(),
@@ -753,7 +727,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Storage events sync
   // ----------------------
   window.addEventListener("storage", (ev) => {
-    const watched = ["studentProfile","profilePic","studentName","studentEmail","googleUser","googleProfile","paymentHistory","orgsLastUpdated","officerOrgId","officerOrg"];
+    const watched = ["studentProfile","profilePic","studentName","studentEmail","googleUser","googleProfile","paymentHistory","orgsLastUpdated"];
     if (!ev.key) return;
     if (watched.includes(ev.key)) { loadProfile(); loadEvents(); loadPaymentHistory(); }
   });
