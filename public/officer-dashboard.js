@@ -591,7 +591,7 @@ document.addEventListener("DOMContentLoaded", () => {
         <div class="stat-label">Total students who paid</div>
         <div id="countPaid" class="stat-number paid">0</div>
       </div>
-      <div class="stat-card	stat-card--center">
+      <div class="stat-card stat-card--center">
         <div class="stat-label">Total approved transactions</div>
         <div id="countApproved" class="stat-number approved">0</div>
       </div>
@@ -930,26 +930,45 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ----------------------
   // Payments view: render table and stats
+  // - updated to prefer filtering by eventId (if available) and orgId (if available)
   // ----------------------
-  function renderVerifyPaymentsForEvent(eventName) {
+  function renderVerifyPaymentsForEvent(eventName, eventId = null) {
     const paymentHistory = JSON.parse(localStorage.getItem("paymentHistory") || "[]");
     if (!verifyTableBody) return;
     const officerOrg = getCurrentOrg();
+    const officerOrgId = getCurrentOrgId();
 
     (async () => {
       const all = await fetchAllPaymentsFromServer();
 
-      // Filter logic: server items may include purpose/name fields
+      // Filter logic: prefer orgId/eventId when available (modern), fallback to names for legacy records
       const serverFiltered = (all || []).filter(p => {
-        const matchesOrg = p.org === officerOrg || (p.purpose && p.purpose.startsWith(officerOrg)) || false;
-        const matchesEvent = p.event === eventName || (p.purpose && p.purpose.includes(eventName)) || (p.name && p.name === eventName);
+        const matchesOrg = (officerOrgId && (p.orgId === officerOrgId || p.org_id === officerOrgId)) ||
+                           (p.org === officerOrg) || (p.purpose && p.purpose.startsWith(officerOrg)) || false;
+
+        let matchesEvent = false;
+        if (eventId) {
+          matchesEvent = (p.eventId === eventId) || (p.event_id === eventId) || (p.event === eventName);
+        } else {
+          matchesEvent = (p.event === eventName) || (p.purpose && p.purpose.includes(eventName)) || (p.name && p.name === eventName);
+        }
+
         return matchesOrg && matchesEvent;
       });
 
       let toShow = serverFiltered;
       // fallback to localStorage if server returned nothing
       if ((!toShow || toShow.length === 0) && paymentHistory.length > 0) {
-        toShow = paymentHistory.filter(p => p.org === officerOrg && p.event === eventName);
+        toShow = paymentHistory.filter(p => {
+          const matchesOrgLocal = (officerOrgId && (p.orgId === officerOrgId)) || p.org === officerOrg;
+          let matchesEventLocal = false;
+          if (eventId) {
+            matchesEventLocal = (p.eventId === eventId) || (p.event === eventName);
+          } else {
+            matchesEventLocal = p.event === eventName;
+          }
+          return matchesOrgLocal && matchesEventLocal;
+        });
       }
 
       // compute stats
@@ -1156,7 +1175,7 @@ document.addEventListener("DOMContentLoaded", () => {
       paymentHistory[idx].verifiedBy = localStorage.getItem("officerOrg") || profileOrg?.value || "Officer";
       paymentHistory[idx].verifiedAt = new Date().toISOString();
       localStorage.setItem("paymentHistory", JSON.stringify(paymentHistory));
-      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
+      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
       loadEvents();
       alert(`Payment status updated to "${newStatus}" (local)`);
       return;
@@ -1177,7 +1196,7 @@ document.addEventListener("DOMContentLoaded", () => {
           paymentHistory[idx] = Object.assign({}, paymentHistory[idx], updated);
           localStorage.setItem("paymentHistory", JSON.stringify(paymentHistory));
         }
-        if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
+        if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
         loadEvents();
         alert(`Payment marked ${newStatus}`);
         return;
@@ -1195,7 +1214,7 @@ document.addEventListener("DOMContentLoaded", () => {
             paymentHistory[idx] = Object.assign({}, paymentHistory[idx], updated);
             localStorage.setItem("paymentHistory", JSON.stringify(paymentHistory));
           }
-          if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
+          if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
           loadEvents();
           alert('Marked as Pending (server persisted)');
           return;
@@ -1212,13 +1231,13 @@ document.addEventListener("DOMContentLoaded", () => {
         paymentHistory[idxLocal].status = 'pending';
         localStorage.setItem("paymentHistory", JSON.stringify(paymentHistory));
       }
-      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
+      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
       loadEvents();
       alert('Marked as Pending (local update). To persist this change server-side, add a /api/payments/:id/unapprove endpoint on the server.');
     } catch (err) {
       console.error('Failed to update status via server:', err);
       alert('Failed to update status on server. Check console.');
-      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
+      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
     }
   }
 
@@ -1228,7 +1247,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (eventPaymentsHeading) eventPaymentsHeading.textContent = `Payments — ${eventObj.name}`;
     hide(eventsCard); hide(addEventForm); hide(profileForm); show(verifyPaymentsSection, "");
     ensureStatsElements();
-    renderVerifyPaymentsForEvent(eventObj.name);
+    renderVerifyPaymentsForEvent(eventObj.name, eventObj.id);
     try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch {}
   }
 
@@ -1640,7 +1659,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (["paymentHistory","officerOrg","officerProfile","officerProfiles","events","orgsLastUpdated","officerOrgId"].includes(ev.key)) {
       loadProfile();
       loadEvents();
-      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
+      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
     }
   });
 
