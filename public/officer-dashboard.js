@@ -245,15 +245,13 @@ document.addEventListener("DOMContentLoaded", () => {
     const currentOrg = getCurrentOrg();
     const currentOrgId = getCurrentOrgId();
 
-    // Try server first
+    // Try server first (always attempt; handle failures gracefully)
     let serverProfile = null;
-    if (SERVER_BASE) {
-      try {
-        serverProfile = await fetchOfficerProfileFromServer(currentOrg, currentOrgId);
-      } catch (e) {
-        console.debug('Server profile fetch failed, falling back to local storage', e);
-        serverProfile = null;
-      }
+    try {
+      serverProfile = await fetchOfficerProfileFromServer(currentOrg, currentOrgId);
+    } catch (e) {
+      console.debug('Server profile fetch failed, falling back to local storage', e);
+      serverProfile = null;
     }
 
     if (serverProfile) {
@@ -415,7 +413,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   async function saveProfile() {
-    const newOrg = getCurrentOrg();
+    // Allow saving even if localStorage.officerOrg isn't set yet:
+    const newOrg = getCurrentOrg() || (profileOrg && profileOrg.value ? profileOrg.value.trim() : '');
     if (!newOrg) {
       alert("Unable to determine organization to save profile for. Please login first.");
       return;
