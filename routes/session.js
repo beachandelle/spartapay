@@ -35,10 +35,21 @@ module.exports = function (admin, firestore) {
       // Extract role from custom claims if present
       const role = decoded.role || (decoded && decoded.claims && decoded.claims.role) || null;
 
-      // Upsert in Firestore if available (non-blocking to client response)
+      // If the client supplied a richer profile payload, pick it up (optional)
+      // Expectation: req.body.profile is an object with keys like displayName, year, college, department, program, photoURL, etc.
+      const profileFromBody = req.body && req.body.profile && typeof req.body.profile === 'object' ? req.body.profile : null;
+
+      // Upsert in Firestore if available (non-blocking to client response is attempted, but we await to ensure persistence)
       if (firestore) {
         try {
+          // Merge minimal user fields + role first
           await firestore.collection('users').doc(uid).set(Object.assign({}, userObj, role ? { role } : {}), { merge: true });
+
+          // If a profile object was provided, merge it into users/{uid}.profile
+          if (profileFromBody) {
+            // Normalize simple fields where appropriate (do not alter incoming shape)
+            await firestore.collection('users').doc(uid).set({ profile: profileFromBody }, { merge: true });
+          }
         } catch (err) {
           console.warn('Failed to upsert session user in Firestore:', err && err.message ? err.message : err);
         }
