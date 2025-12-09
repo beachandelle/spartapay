@@ -242,8 +242,54 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function loadProfile() {
     // Attempt server-first load (if available) to sync across devices, fallback to localStorage as before
-    const currentOrg = getCurrentOrg();
-    const currentOrgId = getCurrentOrgId();
+    let currentOrg = getCurrentOrg();
+    let currentOrgId = getCurrentOrgId();
+
+    // If we don't have a currentOrg but we have an authenticated session, try to fetch authoritative user profile (including org) from server
+    if ((!currentOrg || currentOrg === "") ) {
+      try {
+        // Only attempt if we have an idToken stored (ensures authenticated call)
+        const maybeToken = localStorage.getItem('idToken');
+        if (maybeToken) {
+          try {
+            const resp = await fetchWithAuth(`${SERVER_BASE}/api/my-profile`, { method: 'GET' });
+            if (resp && resp.ok) {
+              const mp = await resp.json();
+              // mp: { uid, profile, role, org }
+              if (mp) {
+                if (mp.org) {
+                  // Mirror authoritative org/profile into localStorage (similar to serverProfile mirror)
+                  try {
+                    const storeKey = mp.orgId || mp.org || (mp.profile && mp.profile.org) || mp.org;
+                    const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
+                    pm[storeKey] = Object.assign({}, pm[storeKey] || {}, (mp.profile && typeof mp.profile === 'object') ? mp.profile : {}, { org: mp.org, orgId: mp.orgId || pm[storeKey]?.orgId || storeKey });
+                    localStorage.setItem("officerProfiles", JSON.stringify(pm));
+                    try { localStorage.setItem('officerOrg', mp.org); } catch(e) {}
+                    if (mp.orgId) try { localStorage.setItem('officerOrgId', mp.orgId); } catch(e) {}
+                    if (mp.profile && mp.profile.username) try { localStorage.setItem('lastOfficerUsername', mp.profile.username); } catch(e) {}
+                    currentOrg = mp.org;
+                    currentOrgId = mp.orgId || currentOrgId;
+                  } catch (e) {
+                    console.warn('Failed to mirror /api/my-profile to localStorage:', e);
+                  }
+                } else if (mp.profile && typeof mp.profile === 'object') {
+                  // If only profile returned (no org), mirror basic UI keys
+                  try {
+                    if (mp.profile.displayName) localStorage.setItem("studentName", mp.profile.displayName);
+                    if (mp.profile.email) localStorage.setItem("studentEmail", mp.profile.email);
+                    if (mp.profile.photoURL) localStorage.setItem("studentPhotoURL", mp.profile.photoURL);
+                  } catch (e) { /* ignore */ }
+                }
+              }
+            }
+          } catch (e) {
+            console.debug('/api/my-profile fetch failed or unauthenticated:', e);
+          }
+        }
+      } catch (e) {
+        console.debug('my-profile attempt failed:', e);
+      }
+    }
 
     // Try server first (always attempt; handle failures gracefully)
     let serverProfile = null;
@@ -348,8 +394,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (givenNameInput) givenNameInput.value = profile.name?.given || "";
     if (middleInitialInput) middleInitialInput.value = profile.name?.middle || "";
     if (designationInput) designationInput.value = profile.designation || "";
-    if (yearSelect) yearSelect.value = profile.year || "";
-    if (collegeSelect) collegeSelect.value = profile.college || "";
+    if (yearSelect) yearSelect.value = profile.college || "";
 
     if (departmentSelect) {
       departmentSelect.innerHTML = '<option value="">-- Select Department --</option>';
@@ -1022,7 +1067,7 @@ document.addEventListener("DOMContentLoaded", () => {
         let approvedCount = 0;
         let sumApproved = 0;
         (toShow || []).forEach(p => {
-          const key = p.submittedByUid || p.submitted_by_uid || p.submittedByEmail || p.submitted_by_email || p.studentName || p.student || p.student_name || `${p.reference || ''}:${p.amount || ''}`;
+          const key = p.submittedByUid || p.submitted_by_uid || p.submittedByEmail || p.submitted_by_email || p.studentName || p.student || p.student_name || p.payerName || p.name || "Unknown";
           if (key) paidStudents.add(key);
           if (String(p.status || '').toLowerCase() === 'approved') {
             approvedCount++;
