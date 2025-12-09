@@ -2,6 +2,8 @@
 // - Browser ES module for Firebase Auth (no require())
 // - Keeps client idToken and profile in localStorage
 // - Calls POST /session after sign-in to upsert the user on the server
+// - Added: map known officer emails to their organization and persist officerOrg/officerProfiles
+//   (keeps the previous behavior and demo fallback intact)
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import {
@@ -57,6 +59,33 @@ async function callServerSession(idToken) {
   } catch (err) {
     console.error("Failed to POST /session", err);
     return null;
+  }
+}
+
+// Small helper: persist officer organization mapping into localStorage structures
+function persistOfficerOrgToLocalStorage(orgName, profileInfo = {}) {
+  if (!orgName) return;
+  try {
+    // Save explicit current org
+    localStorage.setItem("officerOrg", orgName);
+
+    // Build or merge into officerProfiles map
+    const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
+    pm[orgName] = Object.assign({}, pm[orgName] || {}, profileInfo, { org: orgName });
+    localStorage.setItem("officerProfiles", JSON.stringify(pm));
+
+    // Keep single-key compatibility
+    try { localStorage.setItem("officerProfile", JSON.stringify(pm[orgName])); } catch (e) {}
+
+    // Save a lastOfficerUsername if provided
+    if (profileInfo && profileInfo.username) {
+      try { localStorage.setItem("lastOfficerUsername", profileInfo.username); } catch (e) {}
+    }
+
+    // Mark role locally (useful for UI)
+    try { localStorage.setItem("spartapay_role", "officer"); } catch (e) {}
+  } catch (e) {
+    console.warn('persistOfficerOrgToLocalStorage failed:', e);
   }
 }
 
@@ -160,6 +189,27 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   };
 
+  // Known officer-email -> org mapping
+  // You can extend this list or move it to a server-side mapping if you prefer.
+  const officerEmailToOrg = {
+    "jiecep@officer.com": "JIECEP",
+    "aeess@officer.com": "AeESS",
+    "aices@officer.com": "AICES",
+    "mexess@officer.com": "MEXESS",
+    "abmes@officer.com": "ABMES"
+  };
+
+  // Small helper to infer org from email prefix if explicit mapping missing
+  function inferOrgFromEmail(email) {
+    if (!email || typeof email !== 'string') return "";
+    const local = email.split('@')[0] || "";
+    // Try to convert typical patterns to org name: jiecep -> JIECEP, mexess -> MEXESS, etc.
+    const cleaned = local.replace(/[_\.\-]/g, '').toUpperCase();
+    // If cleaned looks like an acronym/short name we expect, return it
+    if (cleaned.length >= 3 && cleaned.length <= 10) return cleaned;
+    return "";
+  }
+
   // OFFICER LOGIN (Firebase email/password preferred, fallback to manual demo array)
   const loginBtn = document.getElementById("loginBtn");
   if (loginBtn) {
@@ -194,6 +244,30 @@ document.addEventListener("DOMContentLoaded", () => {
         localStorage.setItem("studentName", user.displayName || "");
         localStorage.setItem("studentEmail", user.email || "");
         localStorage.setItem("studentPhotoURL", user.photoURL || "");
+
+        // Determine organization for this officer and persist into officer-specific local keys
+        const normalizedEmail = (user.email || "").toLowerCase();
+        let org = officerEmailToOrg[normalizedEmail];
+        if (!org) {
+          // fall back to inference logic (best-effort)
+          org = inferOrgFromEmail(normalizedEmail);
+        }
+
+        if (org) {
+          // Build a minimal officer profile object to keep old UX working
+          const usernamePrefix = (user.email || "").split('@')[0] || '';
+          const officerProfile = {
+            username: usernamePrefix,
+            name: user.displayName || org,
+            org: org,
+            photoURL: user.photoURL || ""
+          };
+          persistOfficerOrgToLocalStorage(org, officerProfile);
+        } else {
+          // No mapping found — do not block sign-in, but leave org unset.
+          // If you prefer to force mapping, show an alert here instead.
+          console.warn('No officer->org mapping found for', normalizedEmail);
+        }
 
         // Redirect to officer dashboard
         window.location.href = "officer-dashboard.html";
