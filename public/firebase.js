@@ -48,13 +48,34 @@ async function callServerSession(idToken) {
       body: JSON.stringify({ idToken })
     });
     if (!res.ok) {
-      const txt = await res.text();
+      const txt = await res.text().catch(()=>'');
       console.warn('/session returned non-OK:', res.status, txt);
       return null;
     }
     const json = await res.json();
     if (json.uid) localStorage.setItem("spartapay_uid", json.uid);
     if (json.role) localStorage.setItem("spartapay_role", json.role);
+
+    // If server returned authoritative org/profile, persist them locally so all devices use authoritative mapping
+    try {
+      if (json.org) {
+        // profile may be present or not; if present prefer it
+        const profileFromServer = json.profile && typeof json.profile === 'object' ? json.profile : {};
+        persistOfficerOrgToLocalStorage(json.org, profileFromServer);
+      } else if (json.profile && typeof json.profile === 'object') {
+        // If server returned profile but not top-level org, still store profile keys (useful for students)
+        try {
+          if (json.profile.displayName) localStorage.setItem("studentName", json.profile.displayName);
+          if (json.profile.email) localStorage.setItem("studentEmail", json.profile.email);
+          if (json.profile.photoURL) localStorage.setItem("studentPhotoURL", json.profile.photoURL);
+        } catch (e) {
+          // ignore
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to persist server session org/profile locally:', e);
+    }
+
     return json;
   } catch (err) {
     console.error("Failed to POST /session", err);
@@ -97,17 +118,32 @@ onAuthStateChanged(auth, async (user) => {
       const token = await user.getIdToken(true);
       localStorage.setItem("idToken", token);
 
-      // Call server to create/update Firestore user doc
-      await callServerSession(token);
+      // Call server to create/update Firestore user doc and capture server response (authoritative org/profile)
+      try {
+        const sessionJson = await callServerSession(token);
+        if (sessionJson) {
+          // If server returned profile, mirror basic UI keys
+          if (sessionJson.profile && typeof sessionJson.profile === 'object') {
+            try {
+              if (sessionJson.profile.displayName) localStorage.setItem("studentName", sessionJson.profile.displayName);
+              if (sessionJson.profile.email) localStorage.setItem("studentEmail", sessionJson.profile.email);
+              if (sessionJson.profile.photoURL) localStorage.setItem("studentPhotoURL", sessionJson.profile.photoURL);
+            } catch (e) { /* ignore */ }
+          }
+          // If server returned org, persistOfficerOrgToLocalStorage already called inside callServerSession
+        }
+      } catch (e) {
+        console.warn('callServerSession failed from onAuthStateChanged:', e);
+      }
     } catch (err) {
       console.error("Failed to retrieve idToken in onAuthStateChanged:", err);
       localStorage.removeItem("idToken");
     }
 
-    // Basic profile info for UI
-    localStorage.setItem("studentName", user.displayName || "");
-    localStorage.setItem("studentEmail", user.email || "");
-    localStorage.setItem("studentPhotoURL", user.photoURL || "");
+    // Basic profile info for UI (fallback to firebase user if server didn't provide)
+    localStorage.setItem("studentName", user.displayName || localStorage.getItem("studentName") || "");
+    localStorage.setItem("studentEmail", user.email || localStorage.getItem("studentEmail") || "");
+    localStorage.setItem("studentPhotoURL", user.photoURL || localStorage.getItem("studentPhotoURL") || "");
   } else {
     // Signed out — remove client-side stored pieces
     localStorage.removeItem("idToken");
@@ -163,9 +199,18 @@ document.addEventListener("DOMContentLoaded", () => {
         localStorage.setItem("studentEmail", user.email || "");
         localStorage.setItem("studentPhotoURL", user.photoURL || "");
 
-        // Call server session to upsert user in Firestore
+        // Call server session to upsert user in Firestore and use response if available
         if (token) {
-          await callServerSession(token);
+          try {
+            const sessionJson = await callServerSession(token);
+            if (sessionJson && sessionJson.profile && typeof sessionJson.profile === 'object') {
+              if (sessionJson.profile.displayName) localStorage.setItem("studentName", sessionJson.profile.displayName);
+              if (sessionJson.profile.email) localStorage.setItem("studentEmail", sessionJson.profile.email);
+              if (sessionJson.profile.photoURL) localStorage.setItem("studentPhotoURL", sessionJson.profile.photoURL);
+            }
+          } catch (e) {
+            console.warn('callServerSession failed after Google sign-in:', e);
+          }
         }
 
         // Redirect to the dashboard (client will read localStorage for profile and token)
@@ -231,26 +276,34 @@ document.addEventListener("DOMContentLoaded", () => {
         const user = cred.user;
 
         // Get fresh token and persist
+        let sessionJson = null;
         try {
           const token = await user.getIdToken(true);
           localStorage.setItem("idToken", token);
-          // Let server upsert session (server verifies token)
-          await callServerSession(token);
+          // Let server upsert session (server verifies token) and capture response
+          sessionJson = await callServerSession(token);
         } catch (tErr) {
           console.warn("Failed to obtain or POST idToken after officer sign-in:", tErr);
         }
 
-        // Persist basic UI profile info
-        localStorage.setItem("studentName", user.displayName || "");
-        localStorage.setItem("studentEmail", user.email || "");
-        localStorage.setItem("studentPhotoURL", user.photoURL || "");
+        // Persist basic UI profile info (prefer server profile if returned)
+        if (sessionJson && sessionJson.profile && typeof sessionJson.profile === 'object') {
+          if (sessionJson.profile.displayName) localStorage.setItem("studentName", sessionJson.profile.displayName);
+          if (sessionJson.profile.email) localStorage.setItem("studentEmail", sessionJson.profile.email);
+          if (sessionJson.profile.photoURL) localStorage.setItem("studentPhotoURL", sessionJson.profile.photoURL);
+        } else {
+          localStorage.setItem("studentName", user.displayName || "");
+          localStorage.setItem("studentEmail", user.email || "");
+          localStorage.setItem("studentPhotoURL", user.photoURL || "");
+        }
 
-        // Determine organization for this officer and persist into officer-specific local keys
-        const normalizedEmail = (user.email || "").toLowerCase();
-        let org = officerEmailToOrg[normalizedEmail];
-        if (!org) {
-          // fall back to inference logic (best-effort)
-          org = inferOrgFromEmail(normalizedEmail);
+        // Determine organization for this officer: prefer server response, else mapping/inference
+        let org = null;
+        if (sessionJson && sessionJson.org) {
+          org = sessionJson.org;
+        } else {
+          const normalizedEmail = (user.email || "").toLowerCase();
+          org = officerEmailToOrg[normalizedEmail] || inferOrgFromEmail(normalizedEmail);
         }
 
         if (org) {
@@ -258,15 +311,14 @@ document.addEventListener("DOMContentLoaded", () => {
           const usernamePrefix = (user.email || "").split('@')[0] || '';
           const officerProfile = {
             username: usernamePrefix,
-            name: user.displayName || org,
+            name: (sessionJson && sessionJson.profile && sessionJson.profile.displayName) ? sessionJson.profile.displayName : (user.displayName || org),
             org: org,
-            photoURL: user.photoURL || ""
+            photoURL: (sessionJson && sessionJson.profile && sessionJson.profile.photoURL) ? sessionJson.profile.photoURL : (user.photoURL || "")
           };
           persistOfficerOrgToLocalStorage(org, officerProfile);
         } else {
           // No mapping found — do not block sign-in, but leave org unset.
-          // If you prefer to force mapping, show an alert here instead.
-          console.warn('No officer->org mapping found for', normalizedEmail);
+          console.warn('No officer->org mapping found for', user.email || email);
         }
 
         // Redirect to officer dashboard
