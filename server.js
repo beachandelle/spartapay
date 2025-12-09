@@ -137,7 +137,9 @@ async function verifyFirebaseToken(req, res, next) {
     if (!match) return res.status(401).json({ error: 'Missing Authorization Bearer token' });
     const idToken = match[1];
     const decoded = await admin.auth().verifyIdToken(idToken);
-    req.firebaseUser = decoded; // { uid, email, name, ... }
+    // ensure role is surfaced on req.firebaseUser for downstream checks
+    const role = decoded.role || (decoded && decoded.claims && decoded.claims.role) || null;
+    req.firebaseUser = Object.assign({}, decoded, { role: role || null }); // { uid, email, role, ... }
     return next();
   } catch (err) {
     console.error('Token verify error:', err && err.message ? err.message : err);
@@ -669,10 +671,41 @@ app.post('/api/officer-profiles', verifyFirebaseToken, async (req, res) => {
       }
     }
 
+    // If authenticated, persist canonical org mapping into user's doc so /session can return authoritative org
+    try {
+      if (req.firebaseUser && req.firebaseUser.uid) {
+        const uid = req.firebaseUser.uid;
+        const userUpdate = { org: profileObj.org || profileObj.orgId || key, role: 'officer' };
+        if (firestore) {
+          try {
+            await firestore.collection('users').doc(uid).set(userUpdate, { merge: true });
+          } catch (e) {
+            console.warn('Failed to persist user org to Firestore during officer profile upsert:', e);
+          }
+        } else {
+          // local DB fallback: upsert into data.json users map
+          try {
+            const db = readDB();
+            db.users = db.users || {};
+            db.users[uid] = db.users[uid] || {};
+            db.users[uid].org = userUpdate.org;
+            db.users[uid].role = userUpdate.role;
+            writeDB(db);
+          } catch (e) {
+            console.warn('Failed to persist user org to local DB during officer profile upsert:', e);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Error while attempting to persist user-org mapping from officer profile upsert:', e);
+    }
+
     // Signal other tabs/clients via localStorage key if running in same browser (server can't set localStorage on clients)
     // Client code already writes orgsLastUpdated when saving locally; keep that behavior on client.
     console.log('Officer profile upserted for key=', key);
-    return res.json(map[key] || profileObj);
+    // Return the canonical profile object we persisted (from local map if available)
+    const mapAfter = await readOfficerProfilesFromDB();
+    return res.json(mapAfter[key] || profileObj);
   } catch (err) {
     console.error('POST /api/officer-profiles error:', err);
     return res.status(500).json({ error: 'Server error' });
@@ -696,7 +729,8 @@ app.get('/api/my-profile', verifyFirebaseToken, async (req, res) => {
           const data = doc.data();
           const profile = data.profile || null;
           const role = data.role || null;
-          return res.json({ uid, profile, role });
+          const org = data.org || null;
+          return res.json({ uid, profile, role, org });
         }
       } catch (e) {
         console.warn('GET /api/my-profile firestore read failed:', e);
@@ -711,13 +745,14 @@ app.get('/api/my-profile', verifyFirebaseToken, async (req, res) => {
         const userRec = db.users[uid];
         const profile = userRec.profile || userRec || null;
         const role = userRec.role || null;
-        return res.json({ uid, profile, role });
+        const org = userRec.org || null;
+        return res.json({ uid, profile, role, org });
       }
     } catch (e) {
       // ignore and return empty
     }
 
-    return res.json({ uid, profile: null, role: null });
+    return res.json({ uid, profile: null, role: null, org: null });
   } catch (err) {
     console.error('GET /api/my-profile error:', err);
     return res.status(500).json({ error: 'Server error' });
