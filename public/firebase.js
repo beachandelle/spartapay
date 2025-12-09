@@ -9,7 +9,8 @@ import {
   GoogleAuthProvider,
   signInWithPopup,
   signOut,
-  onAuthStateChanged
+  onAuthStateChanged,
+  signInWithEmailAndPassword
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
 // Firebase configuration (keep this as-is for your project)
@@ -159,62 +160,95 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   };
 
-  // OFFICER LOGIN (Manual)
+  // OFFICER LOGIN (Firebase email/password preferred, fallback to manual demo array)
   const loginBtn = document.getElementById("loginBtn");
   if (loginBtn) {
-    loginBtn.addEventListener("click", () => {
+    loginBtn.addEventListener("click", async () => {
       const username = (document.getElementById("email")?.value || "").trim();
       const password = (document.getElementById("password")?.value || "").trim();
 
-      // Hard-coded demo officer accounts (DEV ONLY)
-      const officers = [
-        { username: "jiecep_officer", password: "jiecep123", name: "JIECEP Officer", org: "JIECEP" },
-        { username: "aeess_officer", password: "aeess123", name: "AeESS Officer", org: "AeESS" },
-        { username: "aices_officer", password: "aices123", name: "AICES Officer", org: "AICES" },
-        { username: "mexess_officer", password: "mexess123", name: "MEXESS Officer", org: "MEXESS" },
-        { username: "abmes_officer", password: "abmes123", name: "ABMES Officer", org: "ABMES" }
-      ];
+      if (!username || !password) {
+        alert("Please enter username/email and password.");
+        return;
+      }
 
-      const officer = officers.find(o => o.username === username && o.password === password);
+      // Map short usernames (if UI uses them) to an email address — ensure such email exists in Firebase Auth
+      const email = username.includes("@") ? username : `${username}@officer.com`;
 
-      if (officer) {
-        // Build the minimal profile we get from login
-        const loginProfile = {
-          username: officer.username,
-          name: officer.name,
-          org: officer.org
-        };
+      // Try Firebase email/password sign-in first (preferred)
+      try {
+        const cred = await signInWithEmailAndPassword(auth, email, password);
+        const user = cred.user;
 
-        // Load existing map of profiles (per-org). If none, start with empty object.
-        const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
+        // Get fresh token and persist
+        try {
+          const token = await user.getIdToken(true);
+          localStorage.setItem("idToken", token);
+          // Let server upsert session (server verifies token)
+          await callServerSession(token);
+        } catch (tErr) {
+          console.warn("Failed to obtain or POST idToken after officer sign-in:", tErr);
+        }
 
-        // Merge strategy (preserve previously saved fields for this org)
-        const existing = profilesMap[officer.org] || {};
-
-        let mergedName = existing.name || loginProfile.name;
-
-        const mergedProfile = Object.assign({}, existing, {
-          username: existing.username || loginProfile.username,
-          org: existing.org || loginProfile.org,
-          name: mergedName
-        });
-
-        // Save back into the map (this will preserve other saved fields)
-        profilesMap[officer.org] = mergedProfile;
-        localStorage.setItem("officerProfiles", JSON.stringify(profilesMap));
-
-        // Keep the legacy single-key for compatibility
-        localStorage.setItem("officerProfile", JSON.stringify(mergedProfile));
-
-        // Set current org and logged-in flags
-        localStorage.setItem("officerOrg", officer.org);
-        localStorage.setItem("officerLoggedIn", "true");
-        localStorage.setItem("lastOfficerUsername", officer.username);
+        // Persist basic UI profile info
+        localStorage.setItem("studentName", user.displayName || "");
+        localStorage.setItem("studentEmail", user.email || "");
+        localStorage.setItem("studentPhotoURL", user.photoURL || "");
 
         // Redirect to officer dashboard
         window.location.href = "officer-dashboard.html";
-      } else {
-        alert("Invalid officer credentials. Please try again.");
+        return;
+      } catch (firebaseErr) {
+        console.warn("Firebase officer sign-in failed (falling back to local demo credentials):", firebaseErr);
+        // fallback to legacy local demo accounts for development/testing
+        const officers = [
+          { username: "jiecep_officer", password: "jiecep123", name: "JIECEP Officer", org: "JIECEP" },
+          { username: "aeess_officer", password: "aeess123", name: "AeESS Officer", org: "AeESS" },
+          { username: "aices_officer", password: "aices123", name: "AICES Officer", org: "AICES" },
+          { username: "mexess_officer", password: "mexess123", name: "MEXESS Officer", org: "MEXESS" },
+          { username: "abmes_officer", password: "abmes123", name: "ABMES Officer", org: "ABMES" }
+        ];
+
+        const officer = officers.find(o => o.username === username && o.password === password);
+        if (officer) {
+          // Build the minimal profile we get from login
+          const loginProfile = {
+            username: officer.username,
+            name: officer.name,
+            org: officer.org
+          };
+
+          // Load existing map of profiles (per-org). If none, start with empty object.
+          const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
+
+          // Merge strategy (preserve previously saved fields for this org)
+          const existing = profilesMap[officer.org] || {};
+
+          let mergedName = existing.name || loginProfile.name;
+
+          const mergedProfile = Object.assign({}, existing, {
+            username: existing.username || loginProfile.username,
+            org: existing.org || loginProfile.org,
+            name: mergedName
+          });
+
+          // Save back into the map (this will preserve other saved fields)
+          profilesMap[officer.org] = mergedProfile;
+          localStorage.setItem("officerProfiles", JSON.stringify(profilesMap));
+
+          // Keep the legacy single-key for compatibility
+          localStorage.setItem("officerProfile", JSON.stringify(mergedProfile));
+
+          // Set current org and logged-in flags
+          localStorage.setItem("officerOrg", officer.org);
+          localStorage.setItem("officerLoggedIn", "true");
+          localStorage.setItem("lastOfficerUsername", officer.username);
+
+          // Redirect to officer dashboard
+          window.location.href = "officer-dashboard.html";
+        } else {
+          alert("Invalid officer credentials. Please try again.");
+        }
       }
     });
   }
