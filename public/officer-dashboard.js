@@ -996,8 +996,8 @@ document.addEventListener("DOMContentLoaded", () => {
           });
         }
 
-        // compute stats and render
-        renderPaymentsAndStatsFromArray(toShow);
+        // compute stats and render (no filters active -> update stats)
+        renderPaymentsAndStatsFromArray(toShow, null, true);
         return;
       }
 
@@ -1020,14 +1020,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
             return matchesOrg && matchesEvent;
           });
-          renderPaymentsAndStatsFromArray(serverFiltered);
+          // DO NOT update the summary stat cards when filtering — only update the table
+          renderPaymentsAndStatsFromArray(serverFiltered, null, false);
           return;
         }
 
         // object response
         const payments = payload.payments || [];
         const totals = payload.totals || null;
-        renderPaymentsAndStatsFromArray(payments, totals);
+        // DO NOT update the summary stat cards when filtering — only update the table
+        renderPaymentsAndStatsFromArray(payments, totals, false);
       } catch (err) {
         console.warn('Server-side filtered fetch failed, falling back to client-side filter:', err);
         // fallback: perform client-side filter using full fetchAllPaymentsFromServer
@@ -1055,7 +1057,8 @@ document.addEventListener("DOMContentLoaded", () => {
           }
           return true;
         });
-        renderPaymentsAndStatsFromArray(serverFiltered);
+        // DO NOT update the summary stat cards when filtering — only update the table
+        renderPaymentsAndStatsFromArray(serverFiltered, null, false);
       }
     })();
   }
@@ -1119,32 +1122,35 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // New helper: render payments array and optional totals to table + stats
-  function renderPaymentsAndStatsFromArray(paymentsArray, totals = null) {
+  // updateStats: when false, do NOT update the summary stat cards (only update the table).
+  function renderPaymentsAndStatsFromArray(paymentsArray, totals = null, updateStats = true) {
     try {
       ensureStatsElements();
-      // If totals provided by server, use them directly
-      if (totals && typeof totals === 'object') {
-        if (paidCountEl) paidCountEl.textContent = String(totals.totalCount || (paymentsArray ? paymentsArray.length : 0));
-        if (approvedCountEl) paidCountEl.textContent = String(totals.totalCount || (paymentsArray ? paymentsArray.length : 0)); // placeholder until below sets approved
-        if (approvedCountEl) approvedCountEl.textContent = String(totals.approvedCount || 0);
-        if (receivedTotalEl) receivedTotalEl.textContent = `₱${(Number(totals.totalAmount || 0)).toFixed(2)}`;
-      } else {
-        // compute stats from paymentsArray (client-side)
-        const paidStudents = new Set();
-        let approvedCount = 0;
-        let sumApproved = 0;
-        (paymentsArray || []).forEach(p => {
-          const key = p.submittedByUid || p.submitted_by_uid || p.submittedByEmail || p.submitted_by_email || p.studentName || p.student || p.student_name || `${p.reference || ''}:${p.amount || ''}`;
-          if (key) paidStudents.add(key);
-          if (String(p.status || '').toLowerCase() === 'approved') {
-            approvedCount++;
-            const amt = parseFloat(p.amount || 0) || 0;
-            sumApproved += amt;
-          }
-        });
-        if (paidCountEl) paidCountEl.textContent = String(paidStudents.size);
-        if (approvedCountEl) approvedCountEl.textContent = String(approvedCount);
-        if (receivedTotalEl) receivedTotalEl.textContent = `₱${sumApproved.toFixed(2)}`;
+      // Only update stats when updateStats === true
+      if (updateStats) {
+        if (totals && typeof totals === 'object') {
+          if (paidCountEl) paidCountEl.textContent = String(totals.totalCount || (paymentsArray ? paymentsArray.length : 0));
+          if (approvedCountEl) paidCountEl.textContent = String(totals.totalCount || (paymentsArray ? paymentsArray.length : 0)); // placeholder until below sets approved
+          if (approvedCountEl) approvedCountEl.textContent = String(totals.approvedCount || 0);
+          if (receivedTotalEl) receivedTotalEl.textContent = `₱${(Number(totals.totalAmount || 0)).toFixed(2)}`;
+        } else {
+          // compute stats from paymentsArray (client-side)
+          const paidStudents = new Set();
+          let approvedCount = 0;
+          let sumApproved = 0;
+          (paymentsArray || []).forEach(p => {
+            const key = p.submittedByUid || p.submitted_by_uid || p.submittedByEmail || p.submitted_by_email || p.studentName || p.student || p.student_name || `${p.reference || ''}:${p.amount || ''}`;
+            if (key) paidStudents.add(key);
+            if (String(p.status || '').toLowerCase() === 'approved') {
+              approvedCount++;
+              const amt = parseFloat(p.amount || 0) || 0;
+              sumApproved += amt;
+            }
+          });
+          if (paidCountEl) paidCountEl.textContent = String(paidStudents.size);
+          if (approvedCountEl) approvedCountEl.textContent = String(approvedCount);
+          if (receivedTotalEl) receivedTotalEl.textContent = `₱${sumApproved.toFixed(2)}`;
+        }
       }
 
       // render table
@@ -1487,44 +1493,43 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (e2) { availableFilters = { years: [], blocks: [] }; }
     }
 
-    // Build UI: Year chips and Block chips (search for blocks)
+    // Build UI: Year chips (fixed) and Block chips (derived) with search
     container.innerHTML = "";
+
+    // Fixed years (always show these chips)
+    const FIXED_YEARS = ["1st Year", "2nd Year", "3rd Year", "4th Year"];
 
     // Year section
     const yearSection = document.createElement("div");
     yearSection.style.marginBottom = "12px";
     const yLabel = document.createElement("div"); yLabel.textContent = "Year"; yLabel.style.fontWeight = "600"; yLabel.style.marginBottom = "8px"; yearSection.appendChild(yLabel);
     const yWrap = document.createElement("div"); yWrap.style.display = "flex"; yWrap.style.flexWrap = "wrap"; yWrap.style.gap = "8px";
-    const years = Array.isArray(availableFilters.years) ? availableFilters.years : [];
-    if (years.length === 0) {
-      const none = document.createElement("div"); none.textContent = "No year data available"; none.style.color = "#666"; yearSection.appendChild(none);
-    } else {
-      years.forEach(y => {
-        const chip = document.createElement("button");
-        chip.type = "button";
-        chip.className = "filter-chip";
-        chip.textContent = String(y);
-        chip.dataset.value = String(y);
-        chip.style.border = "1px solid #ddd";
-        chip.style.padding = "8px 10px";
-        chip.style.borderRadius = "6px";
-        chip.style.background = activeFilters.years.includes(String(y)) ? "#222" : "#f7f7f7";
-        chip.style.color = activeFilters.years.includes(String(y)) ? "#fff" : "#111";
-        chip.addEventListener("click", () => {
-          const val = String(y);
-          const idx = activeFilters.years.findIndex(v => normalizeForMatch(v) === normalizeForMatch(val));
-          if (idx === -1) {
-            activeFilters.years.push(val);
-            chip.style.background = "#222"; chip.style.color = "#fff";
-          } else {
-            activeFilters.years.splice(idx, 1);
-            chip.style.background = "#f7f7f7"; chip.style.color = "#111";
-          }
-        });
-        yWrap.appendChild(chip);
+
+    FIXED_YEARS.forEach(y => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "filter-chip";
+      chip.textContent = String(y);
+      chip.dataset.value = String(y);
+      chip.style.border = "1px solid #ddd";
+      chip.style.padding = "8px 10px";
+      chip.style.borderRadius = "6px";
+      chip.style.background = activeFilters.years.includes(String(y)) ? "#222" : "#f7f7f7";
+      chip.style.color = activeFilters.years.includes(String(y)) ? "#fff" : "#111";
+      chip.addEventListener("click", () => {
+        const val = String(y);
+        const idx = activeFilters.years.findIndex(v => normalizeForMatch(v) === normalizeForMatch(val));
+        if (idx === -1) {
+          activeFilters.years.push(val);
+          chip.style.background = "#222"; chip.style.color = "#fff";
+        } else {
+          activeFilters.years.splice(idx, 1);
+          chip.style.background = "#f7f7f7"; chip.style.color = "#111";
+        }
       });
-      yearSection.appendChild(yWrap);
-    }
+      yWrap.appendChild(chip);
+    });
+    yearSection.appendChild(yWrap);
     container.appendChild(yearSection);
 
     // Block section with search
@@ -1547,19 +1552,27 @@ document.addEventListener("DOMContentLoaded", () => {
     if (blocks.length === 0) {
       const none = document.createElement("div"); none.textContent = "No block data available"; none.style.color = "#666"; blockSection.appendChild(none);
     } else {
-      blocks.forEach(b => {
+      // dedupe & normalize display order
+      const seen = new Set();
+      blocks.forEach(raw => {
+        const b = String(raw || '').trim();
+        if (!b) return;
+        const key = normalizeForMatch(b);
+        if (seen.has(key)) return;
+        seen.add(key);
+
         const chip = document.createElement("button");
         chip.type = "button";
         chip.className = "filter-chip";
-        chip.textContent = String(b);
-        chip.dataset.value = String(b);
+        chip.textContent = b;
+        chip.dataset.value = b;
         chip.style.border = "1px solid #ddd";
         chip.style.padding = "8px 10px";
         chip.style.borderRadius = "6px";
-        chip.style.background = activeFilters.blocks.includes(String(b)) ? "#222" : "#f7f7f7";
-        chip.style.color = activeFilters.blocks.includes(String(b)) ? "#fff" : "#111";
+        chip.style.background = activeFilters.blocks.findIndex(v => normalizeForMatch(v) === normalizeForMatch(b)) !== -1 ? "#222" : "#f7f7f7";
+        chip.style.color = activeFilters.blocks.findIndex(v => normalizeForMatch(v) === normalizeForMatch(b)) !== -1 ? "#fff" : "#111";
         chip.addEventListener("click", () => {
-          const val = String(b);
+          const val = b;
           const idx = activeFilters.blocks.findIndex(v => normalizeForMatch(v) === normalizeForMatch(val));
           if (idx === -1) {
             activeFilters.blocks.push(val);
@@ -1657,13 +1670,15 @@ document.addEventListener("DOMContentLoaded", () => {
           }
           return true;
         });
-        renderPaymentsAndStatsFromArray(final);
+        // Render table only (do NOT update summary cards)
+        renderPaymentsAndStatsFromArray(final, null, false);
         return;
       }
       // object response: use payments and totals
       const payments = payload.payments || [];
       const totals = payload.totals || null;
-      renderPaymentsAndStatsFromArray(payments, totals);
+      // Render table only (do NOT update summary cards)
+      renderPaymentsAndStatsFromArray(payments, totals, false);
     } catch (err) {
       console.warn('applyFiltersForCurrentEvent server call failed, attempting client-side fallback:', err);
       // fallback client-side: pull local/all payments then filter
@@ -1687,7 +1702,8 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         return true;
       });
-      renderPaymentsAndStatsFromArray(serverFiltered);
+      // Render table only (do NOT update summary cards)
+      renderPaymentsAndStatsFromArray(serverFiltered, null, false);
     }
   }
 
