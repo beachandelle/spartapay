@@ -2,10 +2,10 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>SpartaPay | Student Dashboard</title>
-  <link rel="stylesheet" href="student-dashboard.css">
+  <link rel="stylesheet" href="student-dashboard.css" />
 </head>
 <body>
   <!-- Header with BSU logo, Nav and Profile Dropdown -->
@@ -134,7 +134,11 @@
     <!-- Profile Form -->
     <div id="profileForm" class="hidden wizard-step card">
       <h3>Student Profile</h3>
-      <img src="default-profile.png" id="profilePicForm" alt="Profile" width="120" class="profile-pic">
+
+      <!-- stacked profile image and name: image centered, name label/input under it -->
+      <div style="display:flex; flex-direction:column; align-items:center; margin-bottom:12px;">
+        <img src="default-profile.png" id="profilePicForm" alt="Profile" width="80" height="80" style="border-radius:50%; object-fit:cover; border:2px solid #eee;">
+      </div>
 
       <label>Name</label>
       <input type="text" id="studentFullName" readonly>
@@ -167,7 +171,7 @@
       </select>
 
       <label>Block</label>
-      <input type="text" id="studentBlock" disabled placeholder="Enter your block (e.g., ECE 4102)">
+      <input type="text" id="studentBlock" disabled placeholder="Enter your block">
 
       <div style="margin-top:12px;">
         <button id="editSaveProfileBtn" type="button" class="btn primary">Edit</button>
@@ -179,4 +183,3 @@
   <script type="module" src="student-dashboard.js"></script>
 </body>
 </html>
-
