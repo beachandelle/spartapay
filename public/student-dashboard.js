@@ -469,8 +469,18 @@ document.addEventListener("DOMContentLoaded", () => {
     if (els.studentDepartment && profile.department) els.studentDepartment.value = profile.department;
     populateProgramDropdown();
     if (els.studentProgram && profile.program) els.studentProgram.value = profile.program;
-    // NEW: Block value
-    if (els.studentBlock) els.studentBlock.value = profile.block || "";
+    // NEW: Block value and visual state
+    if (els.studentBlock) {
+      els.studentBlock.value = profile.block || "";
+      // ensure color matches disabled/enabled state: grayish when disabled (saved), black when editable
+      try {
+        if (els.studentBlock.disabled) {
+          els.studentBlock.style.color = '#6b6b6b';
+        } else {
+          els.studentBlock.style.color = '';
+        }
+      } catch (e) { /* ignore style errors */ }
+    }
   }
 
   // ----------------------
@@ -658,7 +668,7 @@ document.addEventListener("DOMContentLoaded", () => {
     els.editSaveProfileBtn.addEventListener('click', () => {
       const editableFields = [els.studentYear, els.studentCollege, els.studentDepartment, els.studentProgram, els.studentBlock]; // include block
       if (els.editSaveProfileBtn.textContent === 'Edit') {
-        editableFields.forEach(el => { if (el) { el.disabled=false; el.style.backgroundColor='#fff'; el.style.cursor='text'; }});
+        editableFields.forEach(el => { if (el) { el.disabled=false; el.style.backgroundColor='#fff'; el.style.cursor='text'; try { el.style.color = '#000'; } catch(e){} }});
         els.editSaveProfileBtn.textContent = 'Save';
         if (els.profileForm) els.profileForm.classList.remove('hidden');
         if (els.paymentHistorySection) els.paymentHistorySection.classList.add('hidden');
@@ -691,7 +701,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (els.profilePic) els.profilePic.src = updatedProfile.photoURL || 'default-profile.png';
         if (els.profilePicForm) els.profilePicForm.src = updatedProfile.photoURL || 'default-profile.png';
         const editableFields2 = [els.studentYear, els.studentCollege, els.studentDepartment, els.studentProgram, els.studentBlock]; // include block
-        editableFields2.forEach(el => { if (el) { el.disabled=true; el.style.backgroundColor='#e0e0e0'; el.style.cursor='not-allowed'; }});
+        editableFields2.forEach(el => { if (el) { el.disabled=true; el.style.backgroundColor='#e0e0e0'; el.style.cursor='not-allowed'; try { el.style.color = '#6b6b6b'; } catch(e){} }});
         els.editSaveProfileBtn.textContent='Edit';
 
         // Non-blocking server persist: POST to /session with profile payload so server.session.js will persist users/{uid}.profile
