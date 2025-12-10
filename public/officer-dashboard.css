@@ -414,3 +414,110 @@ input[type="text"], input[type="date"], input[type="number"], select, input[type
 }
 
 /* End of stylesheet */
+
+/* -------------------------
+   Filter drawer & chip UI
+   (Added to support the filter drawer created by officer-dashboard.js)
+   Minimal, unobtrusive styles so the drawer looks consistent with the rest of the page.
+   ------------------------- */
+
+#filterDrawerOverlay {
+  /* default hidden; JS creates element and applies inline styles when opening */
+  position: fixed;
+  inset: 0;
+  display: none;
+  z-index: 1800;
+  background: rgba(0,0,0,0.4);
+  justify-content: flex-end;
+  align-items: stretch;
+}
+
+#filterDrawerOverlay.active {
+  display: flex;
+}
+
+#filterDrawer {
+  width: 360px;
+  max-width: 100%;
+  background: #fff;
+  box-shadow: -6px 0 20px rgba(0,0,0,0.2);
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0 0 0 8px;
+}
+
+/* Drawer header */
+#filterDrawer h3 {
+  margin: 0;
+  font-size: 18px;
+  color: #111;
+}
+
+/* Search inside drawer */
+#filterDrawer input[type="search"] {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+
+/* Filter chips (year/block) */
+.filter-chip {
+  display: inline-block;
+  border: 1px solid #ddd;
+  background: #f7f7f7;
+  color: #111;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  margin: 4px 4px 4px 0;
+  transition: background .12s ease, color .12s ease, transform .08s ease;
+  outline: none;
+  text-align: center;
+}
+.filter-chip:hover {
+  background: #eee;
+  transform: translateY(-1px);
+}
+.filter-chip:active { transform: translateY(0); }
+
+/* Selected chip state (JS may set inline styles; this class gives a consistent fallback) */
+.filter-chip.selected,
+.filter-chip.is-selected {
+  background: #222 !important;
+  color: #fff !important;
+  border-color: transparent !important;
+}
+
+/* Drawer footer buttons layout (Clear / Done) */
+#filterDrawer .btn {
+  width: 100%;
+  padding: 10px;
+  font-size: 15px;
+}
+#filterDrawer .btn.secondary { border:1px solid #ddd; background:#fff; color:#333; }
+#filterDrawer .btn.primary { background:var(--accent); color:#fff; }
+
+/* Footer container holds buttons side by side */
+#filterDrawer .modal-footer {
+  display:flex;
+  gap:8px;
+  margin-top: 12px;
+}
+
+/* Responsive: full-width drawer on small screens */
+@media (max-width:480px) {
+  #filterDrawer {
+    width: 100%;
+    border-radius: 0;
+  }
+  #filterDrawerOverlay {
+    align-items: flex-end;
+  }
+}
