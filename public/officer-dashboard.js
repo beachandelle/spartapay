@@ -145,6 +145,27 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  // New: fetch payments with filters (server-side filtering). Returns object { payments, totals, availableFilters } or array fallback
+  async function fetchPaymentsWithFilters({ eventId = null, years = [], blocks = [] } = {}) {
+    try {
+      const params = new URLSearchParams();
+      if (eventId) params.append('eventId', eventId);
+      if (years && years.length > 0) params.append('year', years.join(','));
+      if (blocks && blocks.length > 0) params.append('block', blocks.join(','));
+      const url = `${SERVER_BASE}/api/payments?${params.toString()}`;
+      const res = await fetchWithAuth(url, { method: 'GET' });
+      if (!res.ok) {
+        const txt = await res.text().catch(()=>'');
+        throw new Error(`Server returned ${res.status}: ${txt}`);
+      }
+      const payload = await res.json();
+      return payload;
+    } catch (err) {
+      console.warn('fetchPaymentsWithFilters error:', err);
+      throw err;
+    }
+  }
+
   // ----------------------
   // Utilities
   // ----------------------
@@ -931,6 +952,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // Payments view: render table and stats
   // - updated to prefer filtering by eventId (if available) and orgId (if available)
   // ----------------------
+  // activeFilters will hold the current server-side filter state for the open event
+  let activeFilters = { years: [], blocks: [] };
+
   function renderVerifyPaymentsForEvent(eventName, eventId = null) {
     const paymentHistory = JSON.parse(localStorage.getItem("paymentHistory") || "[]");
     if (!verifyTableBody) return;
@@ -938,72 +962,101 @@ document.addEventListener("DOMContentLoaded", () => {
     const officerOrgId = getCurrentOrgId();
 
     (async () => {
-      const all = await fetchAllPaymentsFromServer();
+      // If no active filters set, prefer server-wide fetch + client fallback as before
+      if ((!activeFilters || (!activeFilters.years.length && !activeFilters.blocks.length))) {
+        const all = await fetchAllPaymentsFromServer();
 
-      // Filter logic: prefer orgId/eventId when available (modern), fallback to names for legacy records
-      const serverFiltered = (all || []).filter(p => {
-        const matchesOrg = (officerOrgId && (p.orgId === officerOrgId || p.org_id === officerOrgId)) ||
-                           (p.org === officerOrg) || (p.purpose && p.purpose.startsWith(officerOrg)) || false;
+        // Filter logic: prefer orgId/eventId when available (modern), fallback to names for legacy records
+        const serverFiltered = (all || []).filter(p => {
+          const matchesOrg = (officerOrgId && (p.orgId === officerOrgId || p.org_id === officerOrgId)) ||
+                             (p.org === officerOrg) || (p.purpose && p.purpose.startsWith(officerOrg)) || false;
 
-        let matchesEvent = false;
-        if (eventId) {
-          matchesEvent = (p.eventId === eventId) || (p.event_id === eventId) || (p.event === eventName);
-        } else {
-          matchesEvent = (p.event === eventName) || (p.purpose && p.purpose.includes(eventName)) || (p.name && p.name === eventName);
+          let matchesEvent = false;
+          if (eventId) {
+            matchesEvent = (p.eventId === eventId) || (p.event_id === eventId) || (p.event === eventName);
+          } else {
+            matchesEvent = (p.event === eventName) || (p.purpose && p.purpose.includes(eventName)) || (p.name && p.name === eventName);
+          }
+
+          return matchesOrg && matchesEvent;
+        });
+
+        let toShow = serverFiltered;
+        // fallback to localStorage if server returned nothing
+        if ((!toShow || toShow.length === 0) && paymentHistory.length > 0) {
+          toShow = paymentHistory.filter(p => {
+            const matchesOrgLocal = (officerOrgId && (p.orgId === officerOrgId)) || p.org === officerOrg;
+            let matchesEventLocal = false;
+            if (eventId) {
+              matchesEventLocal = (p.eventId === eventId) || (p.event === eventName);
+            } else {
+              matchesEventLocal = p.event === eventName;
+            }
+            return matchesOrgLocal && matchesEventLocal;
+          });
         }
 
-        return matchesOrg && matchesEvent;
-      });
-
-      let toShow = serverFiltered;
-      // fallback to localStorage if server returned nothing
-      if ((!toShow || toShow.length === 0) && paymentHistory.length > 0) {
-        toShow = paymentHistory.filter(p => {
-          const matchesOrgLocal = (officerOrgId && (p.orgId === officerOrgId)) || p.org === officerOrg;
-          let matchesEventLocal = false;
-          if (eventId) {
-            matchesEventLocal = (p.eventId === eventId) || (p.event === eventName);
-          } else {
-            matchesEventLocal = p.event === eventName;
-          }
-          return matchesOrgLocal && matchesEventLocal;
-        });
-      }
-
-      // compute stats
-      try {
-        ensureStatsElements();
-        const paidStudents = new Set();
-        let approvedCount = 0;
-        let sumApproved = 0;
-        (toShow || []).forEach(p => {
-          const key = p.submittedByUid || p.submitted_by_uid || p.submittedByEmail || p.submitted_by_email || p.studentName || p.student || p.student_name || `${p.reference || ''}:${p.amount || ''}`;
-          if (key) paidStudents.add(key);
-          if (String(p.status || '').toLowerCase() === 'approved') {
-            approvedCount++;
-            const amt = parseFloat(p.amount || 0) || 0;
-            sumApproved += amt;
-          }
-        });
-
-        if (paidCountEl) paidCountEl.textContent = String(paidStudents.size);
-        if (approvedCountEl) approvedCountEl.textContent = String(approvedCount);
-        if (receivedTotalEl) receivedTotalEl.textContent = `₱${sumApproved.toFixed(2)}`;
-      } catch (e) {
-        console.warn('Failed to compute payment stats:', e);
-      }
-
-      // render table
-      verifyTableBody.innerHTML = "";
-      if (!toShow || toShow.length === 0) {
-        verifyTableBody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:18px">No payments submitted for this event</td></tr>`;
+        // compute stats and render
+        renderPaymentsAndStatsFromArray(toShow);
         return;
       }
 
-      toShow.forEach(rec => {
-        const tr = createVerifyRow(rec);
-        verifyTableBody.appendChild(tr);
-      });
+      // If activeFilters set, call server-side filtered endpoint
+      try {
+        const payload = await fetchPaymentsWithFilters({ eventId, years: activeFilters.years, blocks: activeFilters.blocks });
+        // payload may be array (legacy) or object { payments, totals, availableFilters }
+        if (Array.isArray(payload)) {
+          // treat like unfiltered array - filter client-side by org/event and render
+          const serverFiltered = (payload || []).filter(p => {
+            const matchesOrg = (officerOrgId && (p.orgId === officerOrgId || p.org_id === officerOrgId)) ||
+                               (p.org === officerOrg) || (p.purpose && p.purpose.startsWith(officerOrg)) || false;
+
+            let matchesEvent = false;
+            if (eventId) {
+              matchesEvent = (p.eventId === eventId) || (p.event_id === eventId) || (p.event === eventName);
+            } else {
+              matchesEvent = (p.event === eventName) || (p.purpose && p.purpose.includes(eventName)) || (p.name && p.name === eventName);
+            }
+
+            return matchesOrg && matchesEvent;
+          });
+          renderPaymentsAndStatsFromArray(serverFiltered);
+          return;
+        }
+
+        // object response
+        const payments = payload.payments || [];
+        const totals = payload.totals || null;
+        renderPaymentsAndStatsFromArray(payments, totals);
+      } catch (err) {
+        console.warn('Server-side filtered fetch failed, falling back to client-side filter:', err);
+        // fallback: perform client-side filter using full fetchAllPaymentsFromServer
+        const all = await fetchAllPaymentsFromServer();
+        const normalizedYears = (activeFilters.years || []).map(v => String(v||'').trim().toLowerCase());
+        const normalizedBlocks = (activeFilters.blocks || []).map(v => String(v||'').trim().toLowerCase());
+        const serverFiltered = (all || []).filter(p => {
+          const matchesOrg = (officerOrgId && (p.orgId === officerOrgId || p.org_id === officerOrgId)) ||
+                             (p.org === officerOrg) || (p.purpose && p.purpose.startsWith(officerOrg)) || false;
+          let matchesEvent = false;
+          if (eventId) {
+            matchesEvent = (p.eventId === eventId) || (p.event_id === eventId) || (p.event === eventName);
+          } else {
+            matchesEvent = (p.event === eventName) || (p.purpose && p.purpose.includes(eventName)) || (p.name && p.name === eventName);
+          }
+          if (!matchesOrg || !matchesEvent) return false;
+          // apply year/block normalization includes
+          if (normalizedYears.length > 0) {
+            const py = String(p.studentYear || p.year || '').trim().toLowerCase();
+            if (!normalizedYears.includes(py)) return false;
+          }
+          if (normalizedBlocks.length > 0) {
+            const pb = String(p.studentBlock || p.block || '').trim().toLowerCase();
+            if (!normalizedBlocks.includes(pb)) return false;
+          }
+          return true;
+        });
+        renderPaymentsAndStatsFromArray(serverFiltered);
+      }
     })();
   }
 
@@ -1063,6 +1116,51 @@ document.addEventListener("DOMContentLoaded", () => {
     tr.appendChild(statusCell);
 
     return tr;
+  }
+
+  // New helper: render payments array and optional totals to table + stats
+  function renderPaymentsAndStatsFromArray(paymentsArray, totals = null) {
+    try {
+      ensureStatsElements();
+      // If totals provided by server, use them directly
+      if (totals && typeof totals === 'object') {
+        if (paidCountEl) paidCountEl.textContent = String(totals.totalCount || (paymentsArray ? paymentsArray.length : 0));
+        if (approvedCountEl) paidCountEl.textContent = String(totals.totalCount || (paymentsArray ? paymentsArray.length : 0)); // placeholder until below sets approved
+        if (approvedCountEl) approvedCountEl.textContent = String(totals.approvedCount || 0);
+        if (receivedTotalEl) receivedTotalEl.textContent = `₱${(Number(totals.totalAmount || 0)).toFixed(2)}`;
+      } else {
+        // compute stats from paymentsArray (client-side)
+        const paidStudents = new Set();
+        let approvedCount = 0;
+        let sumApproved = 0;
+        (paymentsArray || []).forEach(p => {
+          const key = p.submittedByUid || p.submitted_by_uid || p.submittedByEmail || p.submitted_by_email || p.studentName || p.student || p.student_name || `${p.reference || ''}:${p.amount || ''}`;
+          if (key) paidStudents.add(key);
+          if (String(p.status || '').toLowerCase() === 'approved') {
+            approvedCount++;
+            const amt = parseFloat(p.amount || 0) || 0;
+            sumApproved += amt;
+          }
+        });
+        if (paidCountEl) paidCountEl.textContent = String(paidStudents.size);
+        if (approvedCountEl) approvedCountEl.textContent = String(approvedCount);
+        if (receivedTotalEl) receivedTotalEl.textContent = `₱${sumApproved.toFixed(2)}`;
+      }
+
+      // render table
+      verifyTableBody.innerHTML = "";
+      if (!paymentsArray || paymentsArray.length === 0) {
+        verifyTableBody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:18px">No payments submitted for this event</td></tr>`;
+        return;
+      }
+
+      paymentsArray.forEach(rec => {
+        const tr = createVerifyRow(rec);
+        verifyTableBody.appendChild(tr);
+      });
+    } catch (e) {
+      console.warn('renderPaymentsAndStatsFromArray error:', e);
+    }
   }
 
   // Show proof modal
@@ -1246,6 +1344,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (eventPaymentsHeading) eventPaymentsHeading.textContent = `Payments — ${eventObj.name}`;
     hide(eventsCard); hide(addEventForm); hide(profileForm); show(verifyPaymentsSection, "");
     ensureStatsElements();
+    // reset active filters when opening an event
+    activeFilters = { years: [], blocks: [] };
     renderVerifyPaymentsForEvent(eventObj.name, eventObj.id);
     try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch {}
   }
@@ -1260,10 +1360,342 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // Filter placeholder
+  // ----------------------
+  // Filter drawer implementation (server-side filters with client fallback)
+  // ----------------------
+  function createFilterDrawer() {
+    // if already present, return it
+    let existing = document.getElementById("filterDrawerOverlay");
+    if (existing) return existing;
+
+    const overlay = document.createElement("div");
+    overlay.id = "filterDrawerOverlay";
+    overlay.style.position = "fixed";
+    overlay.style.top = "0";
+    overlay.style.right = "0";
+    overlay.style.bottom = "0";
+    overlay.style.left = "0";
+    overlay.style.zIndex = "1800";
+    overlay.style.background = "rgba(0,0,0,0.4)";
+    overlay.style.display = "flex";
+    overlay.style.justifyContent = "flex-end";
+    overlay.style.alignItems = "stretch";
+
+    const drawer = document.createElement("aside");
+    drawer.id = "filterDrawer";
+    drawer.style.width = "360px";
+    drawer.style.maxWidth = "100%";
+    drawer.style.background = "#fff";
+    drawer.style.boxShadow = "-6px 0 20px rgba(0,0,0,0.2)";
+    drawer.style.padding = "16px";
+    drawer.style.overflowY = "auto";
+    drawer.style.display = "flex";
+    drawer.style.flexDirection = "column";
+
+    // header
+    const header = document.createElement("div");
+    header.style.display = "flex";
+    header.style.justifyContent = "space-between";
+    header.style.alignItems = "center";
+    header.style.marginBottom = "12px";
+    const h = document.createElement("h3"); h.textContent = "Filter"; h.style.margin = "0"; header.appendChild(h);
+    const closeBtn = document.createElement("button"); closeBtn.type = "button"; closeBtn.textContent = "✕"; closeBtn.style.border = "none"; closeBtn.style.background = "transparent"; closeBtn.style.fontSize = "20px";
+    closeBtn.addEventListener("click", () => { document.body.removeChild(overlay); });
+    header.appendChild(closeBtn);
+    drawer.appendChild(header);
+
+    // container for sections
+    const container = document.createElement("div");
+    container.id = "filterSections";
+    container.style.flex = "1 1 auto";
+    drawer.appendChild(container);
+
+    // footer buttons
+    const footer = document.createElement("div");
+    footer.style.display = "flex";
+    footer.style.justifyContent = "space-between";
+    footer.style.marginTop = "12px";
+
+    const clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.textContent = "Clear";
+    clearBtn.className = "btn secondary";
+    clearBtn.style.flex = "1 1 0";
+    clearBtn.style.marginRight = "8px";
+
+    const doneBtn = document.createElement("button");
+    doneBtn.type = "button";
+    doneBtn.textContent = "Done";
+    doneBtn.className = "btn primary";
+    doneBtn.style.flex = "1 1 0";
+
+    footer.appendChild(clearBtn);
+    footer.appendChild(doneBtn);
+    drawer.appendChild(footer);
+
+    overlay.appendChild(drawer);
+    document.body.appendChild(overlay);
+
+    return overlay;
+  }
+
+  // Helper to normalize strings for chip matching (trim + collapse spaces + lowercase)
+  function normalizeForMatch(s) {
+    try {
+      return String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+    } catch (e) { return String(s || '').toLowerCase(); }
+  }
+
+  // Populate drawer with chips for years and blocks
+  async function openFilterDrawer() {
+    if (!currentEventView) {
+      alert("Open an event first to filter its payments.");
+      return;
+    }
+    const overlay = createFilterDrawer();
+    const drawer = overlay.querySelector("#filterDrawer");
+    const container = overlay.querySelector("#filterSections");
+    container.innerHTML = "<p style='color:#666'>Loading filters...</p>";
+
+    // Fetch availableFilters from server for this event (server returns availableFilters when eventId provided)
+    let availableFilters = { years: [], blocks: [] };
+    try {
+      const resp = await fetchWithAuth(`${SERVER_BASE}/api/payments?eventId=${encodeURIComponent(currentEventView.id)}`, { method: 'GET' });
+      if (resp.ok) {
+        const payload = await resp.json();
+        if (payload && payload.availableFilters) {
+          availableFilters = payload.availableFilters;
+        } else if (Array.isArray(payload)) {
+          // payload is array - derive filters client-side
+          const yrs = new Set(); const bls = new Set();
+          payload.forEach(p => { if (p.studentYear) yrs.add(String(p.studentYear)); if (p.studentBlock) bls.add(String(p.studentBlock)); });
+          availableFilters = { years: Array.from(yrs).sort(), blocks: Array.from(bls).sort() };
+        } else if (payload && typeof payload === 'object' && payload.payments) {
+          const yrs = new Set(); const bls = new Set();
+          (payload.payments || []).forEach(p => { if (p.studentYear) yrs.add(String(p.studentYear)); if (p.studentBlock) bls.add(String(p.studentBlock)); });
+          availableFilters = { years: Array.from(yrs).sort(), blocks: Array.from(bls).sort() };
+        }
+      }
+    } catch (e) {
+      console.debug('Failed to fetch availableFilters from server, deriving from local storage', e);
+      // fallback derive from localStorage/paymentHistory
+      try {
+        const local = JSON.parse(localStorage.getItem("paymentHistory") || "[]");
+        const yrs = new Set(); const bls = new Set();
+        (local || []).forEach(p => { if (p.eventId === currentEventView.id || p.event === currentEventView.name) { if (p.studentYear) yrs.add(String(p.studentYear)); if (p.studentBlock) bls.add(String(p.studentBlock)); }});
+        availableFilters = { years: Array.from(yrs).sort(), blocks: Array.from(bls).sort() };
+      } catch (e2) { availableFilters = { years: [], blocks: [] }; }
+    }
+
+    // Build UI: Year chips and Block chips (search for blocks)
+    container.innerHTML = "";
+
+    // Year section
+    const yearSection = document.createElement("div");
+    yearSection.style.marginBottom = "12px";
+    const yLabel = document.createElement("div"); yLabel.textContent = "Year"; yLabel.style.fontWeight = "600"; yLabel.style.marginBottom = "8px"; yearSection.appendChild(yLabel);
+    const yWrap = document.createElement("div"); yWrap.style.display = "flex"; yWrap.style.flexWrap = "wrap"; yWrap.style.gap = "8px";
+    const years = Array.isArray(availableFilters.years) ? availableFilters.years : [];
+    if (years.length === 0) {
+      const none = document.createElement("div"); none.textContent = "No year data available"; none.style.color = "#666"; yearSection.appendChild(none);
+    } else {
+      years.forEach(y => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "filter-chip";
+        chip.textContent = String(y);
+        chip.dataset.value = String(y);
+        chip.style.border = "1px solid #ddd";
+        chip.style.padding = "8px 10px";
+        chip.style.borderRadius = "6px";
+        chip.style.background = activeFilters.years.includes(String(y)) ? "#222" : "#f7f7f7";
+        chip.style.color = activeFilters.years.includes(String(y)) ? "#fff" : "#111";
+        chip.addEventListener("click", () => {
+          const val = String(y);
+          const idx = activeFilters.years.findIndex(v => normalizeForMatch(v) === normalizeForMatch(val));
+          if (idx === -1) {
+            activeFilters.years.push(val);
+            chip.style.background = "#222"; chip.style.color = "#fff";
+          } else {
+            activeFilters.years.splice(idx, 1);
+            chip.style.background = "#f7f7f7"; chip.style.color = "#111";
+          }
+        });
+        yWrap.appendChild(chip);
+      });
+      yearSection.appendChild(yWrap);
+    }
+    container.appendChild(yearSection);
+
+    // Block section with search
+    const blockSection = document.createElement("div");
+    blockSection.style.marginBottom = "12px";
+    const bLabel = document.createElement("div"); bLabel.textContent = "Block"; bLabel.style.fontWeight = "600"; bLabel.style.marginBottom = "8px"; blockSection.appendChild(bLabel);
+
+    const searchInput = document.createElement("input");
+    searchInput.type = "search";
+    searchInput.placeholder = "Search blocks...";
+    searchInput.style.width = "100%";
+    searchInput.style.marginBottom = "8px";
+    searchInput.style.padding = "8px";
+    searchInput.style.border = "1px solid #ddd";
+    blockSection.appendChild(searchInput);
+
+    const bWrap = document.createElement("div"); bWrap.style.display = "flex"; bWrap.style.flexWrap = "wrap"; bWrap.style.gap = "8px";
+    const blocks = Array.isArray(availableFilters.blocks) ? availableFilters.blocks : [];
+    const blockChips = [];
+    if (blocks.length === 0) {
+      const none = document.createElement("div"); none.textContent = "No block data available"; none.style.color = "#666"; blockSection.appendChild(none);
+    } else {
+      blocks.forEach(b => {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "filter-chip";
+        chip.textContent = String(b);
+        chip.dataset.value = String(b);
+        chip.style.border = "1px solid #ddd";
+        chip.style.padding = "8px 10px";
+        chip.style.borderRadius = "6px";
+        chip.style.background = activeFilters.blocks.includes(String(b)) ? "#222" : "#f7f7f7";
+        chip.style.color = activeFilters.blocks.includes(String(b)) ? "#fff" : "#111";
+        chip.addEventListener("click", () => {
+          const val = String(b);
+          const idx = activeFilters.blocks.findIndex(v => normalizeForMatch(v) === normalizeForMatch(val));
+          if (idx === -1) {
+            activeFilters.blocks.push(val);
+            chip.style.background = "#222"; chip.style.color = "#fff";
+          } else {
+            activeFilters.blocks.splice(idx, 1);
+            chip.style.background = "#f7f7f7"; chip.style.color = "#111";
+          }
+        });
+        blockChips.push({ chip, text: String(b).toLowerCase() });
+        bWrap.appendChild(chip);
+      });
+      blockSection.appendChild(bWrap);
+    }
+    container.appendChild(blockSection);
+
+    // search filter behaviour
+    searchInput.addEventListener("input", (e) => {
+      const q = String(e.target.value || '').trim().toLowerCase();
+      blockChips.forEach(({ chip, text }) => {
+        if (!q) {
+          chip.style.display = "";
+        } else {
+          chip.style.display = text.includes(q) ? "" : "none";
+        }
+      });
+    });
+
+    // footer buttons wiring
+    const clearBtn = overlay.querySelector("button.btn.secondary");
+    const doneBtn = overlay.querySelector("button.btn.primary");
+
+    clearBtn.addEventListener("click", () => {
+      activeFilters.years = [];
+      activeFilters.blocks = [];
+      // reset chip styles
+      container.querySelectorAll(".filter-chip").forEach(ch => { ch.style.background = "#f7f7f7"; ch.style.color = "#111"; });
+    });
+
+    doneBtn.addEventListener("click", async () => {
+      // Apply filters for the current event
+      try {
+        // close drawer first
+        if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        await applyFiltersForCurrentEvent(activeFilters.years.slice(), activeFilters.blocks.slice());
+      } catch (e) {
+        console.warn('applyFiltersForCurrentEvent failed:', e);
+        alert('Failed to apply filters. See console.');
+      }
+    });
+
+    // close on backdrop click
+    overlay.addEventListener("click", (ev) => {
+      if (ev.target === overlay) {
+        if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      }
+    });
+
+    // keyboard: close on Escape
+    const escHandler = (ev) => { if (ev.key === 'Escape') { if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay); document.removeEventListener('keydown', escHandler); } };
+    document.addEventListener('keydown', escHandler);
+  }
+
+  // Apply filters for current open event by calling server endpoint and rendering results
+  async function applyFiltersForCurrentEvent(years = [], blocks = []) {
+    if (!currentEventView) { alert('No event open'); return; }
+    // normalize selections and set activeFilters
+    activeFilters.years = Array.isArray(years) ? years.filter(Boolean) : [];
+    activeFilters.blocks = Array.isArray(blocks) ? blocks.filter(Boolean) : [];
+
+    try {
+      const payload = await fetchPaymentsWithFilters({ eventId: currentEventView.id, years: activeFilters.years, blocks: activeFilters.blocks });
+      // payload could be array or object
+      if (Array.isArray(payload)) {
+        // server returned array (legacy) -> filter client-side by org/event as usual then render
+        const officerOrg = getCurrentOrg();
+        const officerOrgId = getCurrentOrgId();
+        const filteredByEvent = (payload || []).filter(p => {
+          const matchesOrg = (officerOrgId && (p.orgId === officerOrgId || p.org_id === officerOrgId)) ||
+                             (p.org === officerOrg) || (p.purpose && p.purpose.startsWith(officerOrg)) || false;
+          const matchesEvent = (p.eventId === currentEventView.id) || (p.event === currentEventView.name) || (p.name === currentEventView.name) || (p.purpose && p.purpose.includes(currentEventView.name));
+          return matchesOrg && matchesEvent;
+        });
+        // additionally apply selected filters client-side for robustness
+        const yrs = activeFilters.years.map(v => normalizeForMatch(v));
+        const bls = activeFilters.blocks.map(v => normalizeForMatch(v));
+        const final = filteredByEvent.filter(p => {
+          if (yrs.length > 0) {
+            const py = normalizeForMatch(p.studentYear || p.year || '');
+            if (!yrs.includes(py)) return false;
+          }
+          if (bls.length > 0) {
+            const pb = normalizeForMatch(p.studentBlock || p.block || '');
+            if (!bls.includes(pb)) return false;
+          }
+          return true;
+        });
+        renderPaymentsAndStatsFromArray(final);
+        return;
+      }
+      // object response: use payments and totals
+      const payments = payload.payments || [];
+      const totals = payload.totals || null;
+      renderPaymentsAndStatsFromArray(payments, totals);
+    } catch (err) {
+      console.warn('applyFiltersForCurrentEvent server call failed, attempting client-side fallback:', err);
+      // fallback client-side: pull local/all payments then filter
+      const all = await fetchAllPaymentsFromServer();
+      const officerOrg = getCurrentOrg();
+      const officerOrgId = getCurrentOrgId();
+      const yrs = (years || []).map(v => normalizeForMatch(v));
+      const bls = (blocks || []).map(v => normalizeForMatch(v));
+      const serverFiltered = (all || []).filter(p => {
+        const matchesOrg = (officerOrgId && (p.orgId === officerOrgId || p.org_id === officerOrgId)) ||
+                           (p.org === officerOrg) || (p.purpose && p.purpose.startsWith(officerOrg)) || false;
+        const matchesEvent = (p.eventId === currentEventView.id) || (p.event === currentEventView.name) || (p.name === currentEventView.name) || (p.purpose && p.purpose.includes(currentEventView.name));
+        if (!matchesOrg || !matchesEvent) return false;
+        if (yrs.length > 0) {
+          const py = normalizeForMatch(p.studentYear || p.year || '');
+          if (!yrs.includes(py)) return false;
+        }
+        if (bls.length > 0) {
+          const pb = normalizeForMatch(p.studentBlock || p.block || '');
+          if (!bls.includes(pb)) return false;
+        }
+        return true;
+      });
+      renderPaymentsAndStatsFromArray(serverFiltered);
+    }
+  }
+
+  // Filter button wiring
   if (filterBtn) {
-    filterBtn.addEventListener("click", () => {
-      alert("Filter UI coming soon — I'll add the filter panel/drawer next.");
+    filterBtn.addEventListener("click", (e) => {
+      // open drawer
+      openFilterDrawer();
     });
   }
 
