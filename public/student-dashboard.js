@@ -32,6 +32,7 @@ document.addEventListener("DOMContentLoaded", () => {
     studentCollege: document.getElementById("studentCollege"),
     studentDepartment: document.getElementById("studentDepartment"),
     studentProgram: document.getElementById("studentProgram"),
+    studentBlock: document.getElementById("studentBlock"), // NEW: Block field
 
     homeBtn: document.getElementById("homeBtn"),
     payNowBtn: document.getElementById("payNowBtn"),
@@ -468,6 +469,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (els.studentDepartment && profile.department) els.studentDepartment.value = profile.department;
     populateProgramDropdown();
     if (els.studentProgram && profile.program) els.studentProgram.value = profile.program;
+    // NEW: Block value
+    if (els.studentBlock) els.studentBlock.value = profile.block || "";
   }
 
   // ----------------------
@@ -653,7 +656,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // ----------------------
   if (els.editSaveProfileBtn) {
     els.editSaveProfileBtn.addEventListener('click', () => {
-      const editableFields = [els.studentYear, els.studentCollege, els.studentDepartment, els.studentProgram];
+      const editableFields = [els.studentYear, els.studentCollege, els.studentDepartment, els.studentProgram, els.studentBlock]; // include block
       if (els.editSaveProfileBtn.textContent === 'Edit') {
         editableFields.forEach(el => { if (el) { el.disabled=false; el.style.backgroundColor='#fff'; el.style.cursor='text'; }});
         els.editSaveProfileBtn.textContent = 'Save';
@@ -675,7 +678,8 @@ document.addEventListener("DOMContentLoaded", () => {
           year: (els.studentYear?els.studentYear.value:'') || prevProfile.year || '',
           college: (els.studentCollege?els.studentCollege.value:'') || prevProfile.college || '',
           department: (els.studentDepartment?els.studentDepartment.value:'') || prevProfile.department || '',
-          program: (els.studentProgram?els.studentProgram.value:'') || prevProfile.program || ''
+          program: (els.studentProgram?els.studentProgram.value:'') || prevProfile.program || '',
+          block: (els.studentBlock && els.studentBlock.value) ? els.studentBlock.value : (prevProfile.block || '') // NEW
         };
 
         // Persist locally as before
@@ -686,7 +690,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (els.headerTitle) els.headerTitle.textContent = updatedProfile.displayName || 'Student';
         if (els.profilePic) els.profilePic.src = updatedProfile.photoURL || 'default-profile.png';
         if (els.profilePicForm) els.profilePicForm.src = updatedProfile.photoURL || 'default-profile.png';
-        const editableFields2 = [els.studentYear, els.studentCollege, els.studentDepartment, els.studentProgram];
+        const editableFields2 = [els.studentYear, els.studentCollege, els.studentDepartment, els.studentProgram, els.studentBlock]; // include block
         editableFields2.forEach(el => { if (el) { el.disabled=true; el.style.backgroundColor='#e0e0e0'; el.style.cursor='not-allowed'; }});
         els.editSaveProfileBtn.textContent='Edit';
 
@@ -802,7 +806,8 @@ document.addEventListener("DOMContentLoaded", () => {
         studentYear: (els.studentYear && els.studentYear.value) ? els.studentYear.value : (studentProfile.year || ''),
         studentCollege: (els.studentCollege && els.studentCollege.value) ? els.studentCollege.value : (studentProfile.college || ''),
         studentDepartment: (els.studentDepartment && els.studentDepartment.value) ? els.studentDepartment.value : (studentProfile.department || ''),
-        studentProgram: (els.studentProgram && els.studentProgram.value) ? els.studentProgram.value : (studentProfile.program || '')
+        studentProgram: (els.studentProgram && els.studentProgram.value) ? els.studentProgram.value : (studentProfile.program || ''),
+        studentBlock: (els.studentBlock && els.studentBlock.value) ? els.studentBlock.value : (studentProfile.block || '') // NEW: include block in payment metadata
       };
 
       (async () => {
