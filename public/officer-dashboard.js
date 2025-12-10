@@ -466,6 +466,24 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
+    // Attempt to refresh the idToken right before doing authenticated requests.
+    // This reduces the chance the server receives an unauthenticated request and only writes local fallback.
+    try {
+      if (window && window._firebaseAuth && window._firebaseAuth.currentUser && typeof window._firebaseAuth.currentUser.getIdToken === 'function') {
+        try {
+          const fresh = await window._firebaseAuth.currentUser.getIdToken(true);
+          if (fresh) {
+            try { localStorage.setItem('idToken', fresh); } catch (e) { /* ignore */ }
+          }
+        } catch (tErr) {
+          console.warn('Failed to refresh idToken before saving profile:', tErr);
+          // continue; fetchWithAuth will use whatever token exists in localStorage
+        }
+      }
+    } catch (e) {
+      // ignore if firebase auth not available in this context
+    }
+
     const profileObj = {
       org: newOrg,
       name: {
