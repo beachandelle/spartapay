@@ -1,4 +1,3 @@
-``` name=officer-dashboard.js
 // officer-dashboard.js - full script (complete).
 // - Renders events, payments table, proof modal
 // - Adds three separate stat cards under Payments heading (paid red, approved green, received black)
@@ -1494,7 +1493,7 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (e2) { availableFilters = { years: [], blocks: [] }; }
     }
 
-    // Build UI: Year chips (fixed) and Block chips (derived) - NO search input, blocks are clickable chips like years
+    // Build UI: Year chips (fixed) and Block chips (derived) with search
     container.innerHTML = "";
 
     // Fixed years (always show these chips)
@@ -1533,10 +1532,19 @@ document.addEventListener("DOMContentLoaded", () => {
     yearSection.appendChild(yWrap);
     container.appendChild(yearSection);
 
-    // Block section (no search) - derive blocks from availableFilters.blocks
+    // Block section with search
     const blockSection = document.createElement("div");
     blockSection.style.marginBottom = "12px";
     const bLabel = document.createElement("div"); bLabel.textContent = "Block"; bLabel.style.fontWeight = "600"; bLabel.style.marginBottom = "8px"; blockSection.appendChild(bLabel);
+
+    const searchInput = document.createElement("input");
+    searchInput.type = "search";
+    searchInput.placeholder = "Search blocks...";
+    searchInput.style.width = "100%";
+    searchInput.style.marginBottom = "8px";
+    searchInput.style.padding = "8px";
+    searchInput.style.border = "1px solid #ddd";
+    blockSection.appendChild(searchInput);
 
     const bWrap = document.createElement("div"); bWrap.style.display = "flex"; bWrap.style.flexWrap = "wrap"; bWrap.style.gap = "8px";
     const blocks = Array.isArray(availableFilters.blocks) ? availableFilters.blocks : [];
@@ -1580,6 +1588,18 @@ document.addEventListener("DOMContentLoaded", () => {
       blockSection.appendChild(bWrap);
     }
     container.appendChild(blockSection);
+
+    // search filter behaviour
+    searchInput.addEventListener("input", (e) => {
+      const q = String(e.target.value || '').trim().toLowerCase();
+      blockChips.forEach(({ chip, text }) => {
+        if (!q) {
+          chip.style.display = "";
+        } else {
+          chip.style.display = text.includes(q) ? "" : "none";
+        }
+      });
+    });
 
     // footer buttons wiring
     const clearBtn = overlay.querySelector("button.btn.secondary");
@@ -2092,4 +2112,3 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // End DOMContentLoaded
 });
-```
