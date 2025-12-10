@@ -428,7 +428,9 @@ document.addEventListener("DOMContentLoaded", () => {
     try { googleProfile = JSON.parse(localStorage.getItem("googleUser") || localStorage.getItem("googleProfile") || "null"); } catch(e) { googleProfile = null; }
     const name = profile.displayName || localStorage.getItem("studentName") || (googleProfile && (googleProfile.displayName || googleProfile.name)) || "Student";
     const email = profile.email || localStorage.getItem("studentEmail") || (googleProfile && (googleProfile.email || googleProfile.emailAddress)) || "";
-    const storedPhoto = profile.photoURL || localStorage.getItem("profilePic") || "";
+    // prefer multiple fallbacks: profile.photoURL -> profilePic -> studentPhotoURL -> googleProfile fields
+    const storedPhoto = (profile && profile.photoURL) ? profile.photoURL
+                      : (localStorage.getItem("profilePic") || localStorage.getItem("studentPhotoURL") || (googleProfile && (googleProfile.photoURL || googleProfile.picture || googleProfile.photo || googleProfile.imageUrl || googleProfile.image) ) || "");
 
     populateCollegeDropdown();
     if (els.headerTitle) els.headerTitle.textContent = name;
@@ -453,15 +455,16 @@ document.addEventListener("DOMContentLoaded", () => {
       photoToUse = "default-profile.png";
     }
 
-    if (els.profilePic) {
-      els.profilePic.onerror = function() { this.onerror = null; this.src = "default-profile.png"; };
-      // cache bust only for debugging if needed: els.profilePic.src = photoToUse + '?v=' + Date.now();
-      els.profilePic.src = photoToUse;
+    // Helper to set img src with onerror fallback
+    function safeSetImg(imgEl, src) {
+      if (!imgEl) return;
+      imgEl.onerror = function() { this.onerror = null; try { this.src = "default-profile.png"; } catch(e){} };
+      try { imgEl.src = src || "default-profile.png"; } catch (e) { imgEl.src = "default-profile.png"; }
     }
-    if (els.profilePicForm) {
-      els.profilePicForm.onerror = function() { this.onerror = null; this.src = "default-profile.png"; };
-      els.profilePicForm.src = photoToUse;
-    }
+
+    // set both header avatar and profile form avatar (if present)
+    safeSetImg(els.profilePic, photoToUse);
+    safeSetImg(els.profilePicForm, photoToUse);
 
     if (els.studentYear) els.studentYear.value = profile.year || "";
     if (els.studentCollege && profile.college) els.studentCollege.value = profile.college;
