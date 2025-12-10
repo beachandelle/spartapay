@@ -184,6 +184,15 @@ function canonicalOrgName(name) {
   }
 }
 
+// Helper: normalize arbitrary filter strings for matching (trim, collapse whitespace, lower-case)
+function normalizeFilterValue(val) {
+  try {
+    return String(val || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  } catch (e) {
+    return String(val || '').trim().toLowerCase();
+  }
+}
+
 // Helper: upsert organization by name (returns the org object)
 async function upsertOrganizationByName(orgName, { displayName = null, logoUrl = null, contactEmail = null, metadata = null } = {}) {
   if (!orgName) return null;
@@ -313,6 +322,19 @@ async function listOrgsFirestore() {
     return snap.docs.map(d => d.data());
   } catch (err) {
     console.warn('listOrgsFirestore failed:', err);
+    return null;
+  }
+}
+
+async function listPaymentsFirestoreFiltered({ eventId = null } = {}) {
+  if (!firestore) return null;
+  try {
+    let q = firestore.collection('payments');
+    if (eventId) q = q.where('eventId', '==', String(eventId));
+    const snap = await q.get();
+    return snap.docs.map(d => d.data());
+  } catch (err) {
+    console.warn('listPaymentsFirestoreFiltered failed:', err);
     return null;
   }
 }
@@ -1022,45 +1044,137 @@ app.delete('/api/events/:id', async (req, res) => {
 // ----------------------
 
 // GET /api/payments - list all payments (inject signed URLs when possible)
+// Supports optional server-side filtering when query params (eventId, year, block) are provided.
+// If no filter params are provided, returns the legacy array shape for backward compatibility.
+// If filter params are provided, returns an object: { payments: [...], totals: {...}, availableFilters: {...} }
 app.get('/api/payments', async (req, res) => {
   try {
-    if (firestore) {
-      const payments = await listPaymentsFirestore();
-      if (Array.isArray(payments)) {
-        if (supabase) {
-          await Promise.all(payments.map(async (p) => {
-            if (p.proofObjectPath) {
-              try {
-                const url = await makeFileUrl(p.proofObjectPath);
-                if (url) p.proofFile = url;
-              } catch (err) {
-                console.warn('Failed to create signed URL for', p.proofObjectPath, err && err.message ? err.message : err);
-              }
-            }
-          }));
-        }
-        return res.json(payments);
-      }
-      // else fallthrough
+    // parse filter query params
+    const eventId = req.query.eventId || req.query.event_id || null;
+    // year and block may be provided multiple times or as comma-separated lists
+    const rawYears = req.query.year || req.query.years || null;
+    const rawBlocks = req.query.block || req.query.blocks || null;
+
+    function toArrayOrNull(raw) {
+      if (!raw && raw !== 0) return null;
+      if (Array.isArray(raw)) return raw;
+      // comma-separated
+      return String(raw).split(',').map(s => s.trim()).filter(Boolean);
     }
 
-    const db = readDB();
-    const payments = db.payments.map(p => ({ ...p })); // shallow clone
+    const yearsArr = toArrayOrNull(rawYears);
+    const blocksArr = toArrayOrNull(rawBlocks);
 
+    const hasFilter = Boolean(eventId || (yearsArr && yearsArr.length > 0) || (blocksArr && blocksArr.length > 0));
+
+    // Helper to normalize string for comparison
+    const normalize = (v) => normalizeFilterValue(v);
+
+    // Fetch payments source depending on Firestore vs local
+    let paymentsSource = null;
+    if (firestore) {
+      // If eventId present, narrow by eventId in Firestore to reduce data transferred
+      if (eventId) {
+        const list = await listPaymentsFirestoreFiltered({ eventId });
+        if (Array.isArray(list)) paymentsSource = list.map(p => (p && typeof p === 'object') ? Object.assign({}, p) : p);
+      } else {
+        const list = await listPaymentsFirestore();
+        if (Array.isArray(list)) paymentsSource = list.map(p => (p && typeof p === 'object') ? Object.assign({}, p) : p);
+      }
+    }
+
+    if (!paymentsSource) {
+      const db = readDB();
+      // If eventId provided and not using Firestore, narrow locally
+      paymentsSource = (db.payments || []).map(p => Object.assign({}, p));
+      if (eventId) {
+        paymentsSource = paymentsSource.filter(p => p.eventId === eventId || p.event === eventId);
+      }
+    }
+
+    // Derive availableFilters (distinct years/blocks) from event-scoped payments (prefer event-scoped if eventId provided)
+    const availableYearsSet = new Set();
+    const availableBlocksSet = new Set();
+    paymentsSource.forEach(p => {
+      if (p.studentYear) availableYearsSet.add(String(p.studentYear).trim());
+      if (p.studentBlock) availableBlocksSet.add(String(p.studentBlock).trim());
+    });
+
+    const availableFilters = {
+      years: Array.from(availableYearsSet).sort(),
+      blocks: Array.from(availableBlocksSet).sort()
+    };
+
+    // If no filters requested, maintain legacy behavior by returning array (but still inject proofFile URLs)
+    if (!hasFilter) {
+      // Inject proofFile signed URLs where possible (async)
+      if (supabase) {
+        await Promise.all(paymentsSource.map(async (p) => {
+          if (p.proofObjectPath) {
+            try {
+              const url = await makeFileUrl(p.proofObjectPath);
+              if (url) p.proofFile = url;
+            } catch (err) {
+              console.warn('Failed to create signed URL for', p.proofObjectPath, err && err.message ? err.message : err);
+            }
+          }
+        }));
+      }
+      return res.json(paymentsSource);
+    }
+
+    // Otherwise apply server-side filtering with normalization
+    const yearsNormalized = new Set((yearsArr || []).map(y => normalize(y)));
+    const blocksNormalized = new Set((blocksArr || []).map(b => normalize(b)));
+
+    const filtered = paymentsSource.filter(p => {
+      // Year filter: if specified, require match; else allow
+      if (yearsNormalized.size > 0) {
+        const py = normalize(p.studentYear || p.year || '');
+        if (!yearsNormalized.has(py)) return false;
+      }
+      // Block filter: if specified, require normalized equality
+      if (blocksNormalized.size > 0) {
+        const pb = normalize(p.studentBlock || p.block || '');
+        if (!blocksNormalized.has(pb)) return false;
+      }
+      return true;
+    });
+
+    // Inject proofFile signed URLs where possible
     if (supabase) {
-      await Promise.all(payments.map(async (p) => {
+      await Promise.all(filtered.map(async (p) => {
         if (p.proofObjectPath) {
           try {
             const url = await makeFileUrl(p.proofObjectPath);
             if (url) p.proofFile = url;
           } catch (err) {
-            // keep existing p.proofFile if any (local fallback)
             console.warn('Failed to create signed URL for', p.proofObjectPath, err && err.message ? err.message : err);
           }
         }
       }));
     }
-    res.json(payments);
+
+    // Compute totals for filtered set
+    let totalCount = filtered.length;
+    let approvedCount = 0;
+    let totalAmount = 0;
+    filtered.forEach(p => {
+      if (p.status && String(p.status).toLowerCase() === 'approved') approvedCount++;
+      const amt = parseFloat(p.amount || 0) || 0;
+      totalAmount += amt;
+    });
+
+    // Return advanced response shape for filtered queries
+    return res.json({
+      payments: filtered,
+      totals: {
+        totalCount,
+        approvedCount,
+        totalAmount
+      },
+      availableFilters
+    });
   } catch (err) {
     console.error('GET /api/payments error:', err);
     res.status(500).json({ error: 'Server error' });
