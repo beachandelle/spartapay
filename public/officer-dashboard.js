@@ -166,7 +166,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (lastUser) {
       for (const [k, v] of Object.entries(profilesMap)) {
         if (v && v.username && v.username === lastUser) {
-          try { localStorage.setItem("officerOrg", k); } catch (e) {}
+          localStorage.setItem("officerOrg", k);
           return k;
         }
       }
@@ -175,211 +175,26 @@ document.addEventListener("DOMContentLoaded", () => {
     // If there is exactly one saved org, use it (convenience)
     const keys = Object.keys(profilesMap || {});
     if (keys.length === 1) {
-      try { localStorage.setItem("officerOrg", keys[0]); } catch (e) {}
+      localStorage.setItem("officerOrg", keys[0]);
       return keys[0];
     }
 
     return "";
   }
 
-  function getCurrentOrgId() {
-    // Prefer explicit officerOrgId if present
-    const storedId = localStorage.getItem("officerOrgId") || "";
-    if (storedId) return storedId;
-
-    // Otherwise try to read from profiles map
-    const org = getCurrentOrg();
-    if (!org) return "";
-    const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-    if (profilesMap && profilesMap[org] && profilesMap[org].orgId) return profilesMap[org].orgId;
-    return "";
-  }
-
-  // New helpers: server-backed officer profile get/upsert
-  async function fetchOfficerProfileFromServer(orgName, orgId) {
-    try {
-      let url = `${SERVER_BASE}/api/officer-profiles`;
-      if (orgId) url += `?orgId=${encodeURIComponent(orgId)}`;
-      else if (orgName) url += `?org=${encodeURIComponent(orgName)}`;
-      const res = await fetchWithAuth(url, { method: 'GET' });
-      if (!res.ok) {
-        // treat as no server profile
-        return null;
-      }
-      const arr = await res.json();
-      if (!Array.isArray(arr) || arr.length === 0) return null;
-      return arr[0];
-    } catch (e) {
-      console.warn('fetchOfficerProfileFromServer error:', e);
-      return null;
-    }
-  }
-
-  async function upsertOfficerProfileToServer(orgName, orgId, profileObj) {
-    try {
-      const payload = { org: orgName, orgId: orgId, profile: profileObj };
-      const res = await fetchWithAuth(`${SERVER_BASE}/api/officer-profiles`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      if (!res.ok) {
-        const txt = await res.text().catch(()=>'');
-        throw new Error(`Server responded ${res.status}: ${txt}`);
-      }
-      const json = await res.json();
-      return json;
-    } catch (e) {
-      console.warn('upsertOfficerProfileToServer error:', e);
-      return null;
-    }
-  }
-
-  function loadProfileFromLocalStorageMap(key) {
-    const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-    return profilesMap[key] || null;
-  }
-
-  async function loadProfile() {
-    // Attempt server-first load (if available) to sync across devices, fallback to localStorage as before
-    let currentOrg = getCurrentOrg();
-    let currentOrgId = getCurrentOrgId();
-
-    // If we don't have a currentOrg but we have an authenticated session, try to fetch authoritative user profile (including org) from server
-    if ((!currentOrg || currentOrg === "") ) {
-      try {
-        // Only attempt if we have an idToken stored (ensures authenticated call)
-        const maybeToken = localStorage.getItem('idToken');
-        if (maybeToken) {
-          try {
-            const resp = await fetchWithAuth(`${SERVER_BASE}/api/my-profile`, { method: 'GET' });
-            if (resp && resp.ok) {
-              const mp = await resp.json();
-              // mp: { uid, profile, role, org }
-              if (mp) {
-                if (mp.org) {
-                  // Mirror authoritative org/profile into localStorage (similar to serverProfile mirror)
-                  try {
-                    const storeKey = mp.orgId || mp.org || (mp.profile && mp.profile.org) || mp.org;
-                    const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-                    pm[storeKey] = Object.assign({}, pm[storeKey] || {}, (mp.profile && typeof mp.profile === 'object') ? mp.profile : {}, { org: mp.org, orgId: mp.orgId || pm[storeKey]?.orgId || storeKey });
-                    localStorage.setItem("officerProfiles", JSON.stringify(pm));
-                    try { localStorage.setItem('officerOrg', mp.org); } catch(e) {}
-                    if (mp.orgId) try { localStorage.setItem('officerOrgId', mp.orgId); } catch(e) {}
-                    if (mp.profile && mp.profile.username) try { localStorage.setItem('lastOfficerUsername', mp.profile.username); } catch(e) {}
-                    currentOrg = mp.org;
-                    currentOrgId = mp.orgId || currentOrgId;
-                  } catch (e) {
-                    console.warn('Failed to mirror /api/my-profile to localStorage:', e);
-                  }
-                } else if (mp.profile && typeof mp.profile === 'object') {
-                  // If only profile returned (no org), mirror basic UI keys
-                  try {
-                    if (mp.profile.displayName) localStorage.setItem("studentName", mp.profile.displayName);
-                    if (mp.profile.email) localStorage.setItem("studentEmail", mp.profile.email);
-                    if (mp.profile.photoURL) localStorage.setItem("studentPhotoURL", mp.profile.photoURL);
-                  } catch (e) { /* ignore */ }
-                }
-              }
-            }
-          } catch (e) {
-            console.debug('/api/my-profile fetch failed or unauthenticated:', e);
-          }
-        }
-      } catch (e) {
-        console.debug('my-profile attempt failed:', e);
-      }
-    }
-
-    // Try server first (always attempt; handle failures gracefully)
-    let serverProfile = null;
-    try {
-      serverProfile = await fetchOfficerProfileFromServer(currentOrg, currentOrgId);
-    } catch (e) {
-      console.debug('Server profile fetch failed, falling back to local storage', e);
-      serverProfile = null;
-    }
-
-    if (serverProfile) {
-      // Normalize and persist to local mirror for offline use
-      try {
-        const key = serverProfile.orgId || (serverProfile.org ? serverProfile.org : (serverProfile.orgKey || ''));
-        const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-        // choose canonical key: prefer orgId if present else canonical org name (string)
-        const storeKey = key || (serverProfile.org ? serverProfile.org : (serverProfile.orgKey || ''));
-        profilesMap[storeKey] = Object.assign({}, profilesMap[storeKey] || {}, serverProfile);
-        localStorage.setItem("officerProfiles", JSON.stringify(profilesMap));
-        if (serverProfile.orgId) {
-          try { localStorage.setItem('officerOrgId', serverProfile.orgId); } catch (e) {}
-        }
-      } catch (e) {
-        console.warn('Failed to mirror server profile to localStorage:', e);
-      }
-
-      // Use server profile for UI
-      const profile = serverProfile;
-      if (profileOrg) { profileOrg.value = profile.org || currentOrg || ""; profileOrg.readOnly = true; }
-      if (surnameInput) surnameInput.value = profile.name?.surname || "";
-      if (givenNameInput) givenNameInput.value = profile.name?.given || "";
-      if (middleInitialInput) middleInitialInput.value = profile.name?.middle || "";
-      if (designationInput) designationInput.value = profile.designation || "";
-      if (yearSelect) yearSelect.value = profile.year || "";
-      if (collegeSelect) collegeSelect.value = profile.college || "";
-
-      if (departmentSelect) {
-        departmentSelect.innerHTML = '<option value="">-- Select Department --</option>';
-        if (profile.college && collegeData[profile.college]) {
-          Object.keys(collegeData[profile.college]).forEach(dep => {
-            const opt = document.createElement("option");
-            opt.value = dep; opt.textContent = dep;
-            departmentSelect.appendChild(opt);
-          });
-        }
-        departmentSelect.value = profile.department || "";
-      }
-      if (programSelect) {
-        programSelect.innerHTML = '<option value="">-- Select Program --</option>';
-        if (profile.college && profile.department && collegeData[profile.college] && collegeData[profile.college][profile.department]) {
-          collegeData[profile.college][profile.department].forEach(prog => {
-            const opt = document.createElement("option");
-            opt.value = prog; opt.textContent = prog;
-            programSelect.appendChild(opt);
-          });
-        }
-        programSelect.value = profile.program || "";
-      }
-
-      setProfileReadOnly(true);
-      if (editSaveProfileBtn) editSaveProfileBtn.textContent = "Edit";
-
-      const orgName = profile.org || currentOrg || "";
-      if (orgName) {
-        if (headerTitle) headerTitle.textContent = `Hello, ${orgName}`;
-        if (officerNameSpan) officerNameSpan.textContent = orgName;
-      } else {
-        if (headerTitle) headerTitle.textContent = `Hello`;
-        if (officerNameSpan) officerNameSpan.textContent = "";
-      }
-
-      if (profile.photoURL && profile.org && profile.org === orgName && profilePic) {
-        profilePic.src = profile.photoURL;
-      }
-
-      return;
-    }
-
-    // else fall back to previous local storage logic
+  function loadProfile() {
+    const currentOrg = getCurrentOrg();
     const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
     let profile = {};
 
-    const current = currentOrg;
-    if (current && profilesMap[current]) {
-      profile = profilesMap[current];
+    if (currentOrg && profilesMap[currentOrg]) {
+      profile = profilesMap[currentOrg];
     } else {
+      // Fallback to single-key officerProfile only if matches currentOrg or when no org selected
       const single = JSON.parse(localStorage.getItem("officerProfile") || "{}");
       if (single && Object.keys(single).length > 0) {
         const singleOrg = single.org || "";
-        if ((!current && singleOrg) || (current && singleOrg && singleOrg === current)) {
+        if ((!currentOrg && singleOrg) || (currentOrg && singleOrg && singleOrg === currentOrg)) {
           profile = single;
         } else {
           profile = {};
@@ -394,8 +209,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (givenNameInput) givenNameInput.value = profile.name?.given || "";
     if (middleInitialInput) middleInitialInput.value = profile.name?.middle || "";
     if (designationInput) designationInput.value = profile.designation || "";
-    if (yearSelect) yearSelect.value = profile.college || "";
+    if (yearSelect) yearSelect.value = profile.year || "";
+    if (collegeSelect) collegeSelect.value = profile.college || "";
 
+    // Populate departments/programs if present
     if (departmentSelect) {
       departmentSelect.innerHTML = '<option value="">-- Select Department --</option>';
       if (profile.college && collegeData[profile.college]) {
@@ -457,43 +274,11 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // NOTE: changed to write-through: attempt server upsert first, then update localStorage.
-  // Instrumented and hardened saveProfile so we can see why network requests may not appear,
-  // and to reliably attach a fresh Firebase idToken when available.
-  async function saveProfile() {
-    console.log('saveProfile called');
-    // Allow saving even if localStorage.officerOrg isn't set yet:
-    const newOrg = getCurrentOrg() || (profileOrg && profileOrg.value ? profileOrg.value.trim() : '');
-    const currentOrgId = getCurrentOrgId();
-    console.log('saveProfile: newOrg=', newOrg, 'currentOrgId=', currentOrgId, 'SERVER_BASE=', SERVER_BASE);
-
+  function saveProfile() {
+    const newOrg = getCurrentOrg();
     if (!newOrg) {
       alert("Unable to determine organization to save profile for. Please login first.");
-      console.warn('saveProfile aborted: no org determined');
       return;
-    }
-
-    // Refresh idToken before authenticated requests.
-    let freshToken = null;
-    try {
-      if (window && window._firebaseAuth && window._firebaseAuth.currentUser && typeof window._firebaseAuth.currentUser.getIdToken === 'function') {
-        try {
-          freshToken = await window._firebaseAuth.currentUser.getIdToken(true);
-          console.log('saveProfile: got fresh idToken via firebase:', !!freshToken);
-          if (freshToken) {
-            try { localStorage.setItem('idToken', freshToken); } catch (e) { /* ignore */ }
-          }
-        } catch (tErr) {
-          console.warn('Failed to refresh idToken before saving profile:', tErr);
-          // continue: we'll try to use stored token
-        }
-      } else {
-        freshToken = localStorage.getItem('idToken') || null;
-        console.log('saveProfile: no firebase currentUser. stored idToken present=', !!freshToken);
-      }
-    } catch (e) {
-      freshToken = localStorage.getItem('idToken') || null;
-      console.warn('saveProfile: token refresh attempt threw', e);
     }
 
     const profileObj = {
@@ -511,180 +296,48 @@ document.addEventListener("DOMContentLoaded", () => {
       photoURL: profilePic ? profilePic.src : ""
     };
 
-    // Preserve username if present locally
-    try {
-      const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-      if (profilesMap[newOrg] && profilesMap[newOrg].username) {
-        profileObj.username = profilesMap[newOrg].username;
-      } else {
-        const lastUser = localStorage.getItem("lastOfficerUsername") || "";
-        if (lastUser) profileObj.username = lastUser;
-      }
-    } catch (e) {
-      // ignore parse errors
+    const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
+
+    // Try preserve username if present
+    if (profilesMap[newOrg] && profilesMap[newOrg].username) {
+      profileObj.username = profilesMap[newOrg].username;
+    } else {
+      // Keep lastOfficerUsername if present
+      const lastUser = localStorage.getItem("lastOfficerUsername") || "";
+      if (lastUser) profileObj.username = lastUser;
     }
 
-    console.log('saveProfile: profileObj=', profileObj);
+    // Save per-org map and also write single-key fallback (only for convenience)
+    profilesMap[newOrg] = Object.assign({}, profilesMap[newOrg] || {}, profileObj);
+    localStorage.setItem("officerProfiles", JSON.stringify(profilesMap));
+    localStorage.setItem("officerOrg", newOrg);
+    localStorage.setItem("officerProfile", JSON.stringify(profileObj)); // single-key fallback
 
-    // Attempt server-first upsert. If server operations succeed, mirror authoritative profile.
-    try {
-      // Ensure organization exists on server first
-      console.log('saveProfile: calling upsertOrgOnServer(', newOrg, ')');
-      const orgResp = await upsertOrgOnServer(newOrg);
-      console.log('saveProfile: upsertOrgOnServer returned', orgResp && (orgResp.id || orgResp.name) ? orgResp : 'null/empty');
-      let orgId = null;
-      if (orgResp && orgResp.id) {
-        orgId = orgResp.id;
-      }
+    // Persist lastOfficerUsername if username present
+    if (profileObj.username) localStorage.setItem("lastOfficerUsername", profileObj.username);
 
-      // Use fetchWithAuth so token is attached if available
-      const payload = { org: newOrg, orgId: orgId, profile: profileObj };
+    if (headerTitle) headerTitle.textContent = `Hello ${profileObj.org}`;
+    if (officerNameSpan) officerNameSpan.textContent = profileObj.org;
 
-      console.log('saveProfile: about to POST /api/officer-profiles payload=', payload);
-      // If fetchWithAuth is used, it will include Authorization header based on localStorage idToken.
-      const res = await fetchWithAuth(`${SERVER_BASE}/api/officer-profiles`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      if (!res) {
-        console.error('saveProfile: fetch returned falsy response object');
-      } else {
-        console.log('saveProfile: POST responded', res.status, res.statusText);
-      }
-
-      if (!res || !res.ok) {
-        const txt = res ? await res.text().catch(()=>'') : 'no-response';
-        console.error('Failed to save officer profile to server:', res ? res.status : 'no-res', txt);
-        // Mirror local so user doesn't lose edits
-        try {
+    // Non-blocking attempt to ensure organization exists on server.
+    (async () => {
+      try {
+        const org = await upsertOrgOnServer(newOrg);
+        if (org && org.id) {
+          // store org id in profiles map for convenience
           const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-          const storeKey = (orgId || newOrg);
-          pm[storeKey] = Object.assign({}, pm[storeKey] || {}, profileObj, { org: newOrg, orgId: orgId || pm[storeKey]?.orgId || storeKey });
+          pm[newOrg] = pm[newOrg] || {};
+          pm[newOrg].orgId = org.id;
           localStorage.setItem("officerProfiles", JSON.stringify(pm));
-          try { localStorage.setItem('officerProfile', JSON.stringify(pm[storeKey])); } catch (e) {}
+        }
+        // signal other tabs (same browser) to refresh org lists
+        try {
+          localStorage.setItem('orgsLastUpdated', String(Date.now()));
         } catch (e) { /* ignore */ }
-        alert(`Failed to save profile to server: ${res ? res.status : 'no response'} ${txt || ''}\nSaved locally for this device.`);
-        return;
-      }
-
-      // Server returned success: mirror server's canonical profile
-      const serverResponse = await res.json().catch(()=>null);
-      console.log('saveProfile: serverResponse=', serverResponse);
-      const serverProfile = serverResponse || {};
-      try {
-        const key = serverProfile.orgId || serverProfile.org || serverProfile.orgKey || orgId || newOrg;
-        const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-        profilesMap[key] = Object.assign({}, profilesMap[key] || {}, serverProfile);
-        profilesMap[key].org = serverProfile.org || newOrg;
-        if (serverProfile.orgId) profilesMap[key].orgId = serverProfile.orgId;
-        localStorage.setItem("officerProfiles", JSON.stringify(profilesMap));
-        try { localStorage.setItem('officerProfile', JSON.stringify(profilesMap[key])); } catch (e) {}
-        if (profilesMap[key].username) try { localStorage.setItem('lastOfficerUsername', profilesMap[key].username); } catch (e) {}
-        try { localStorage.setItem('officerOrg', profilesMap[key].org); } catch (e) {}
-        if (profilesMap[key].orgId) try { localStorage.setItem('officerOrgId', profilesMap[key].orgId); } catch (e) {}
       } catch (e) {
-        console.warn('Failed to mirror server profile to localStorage after successful save:', e);
+        console.warn('Failed to upsert org after saving profile:', e);
       }
-
-      // Try to inform /session about updated profile so users/{uid}.profile is updated
-      try {
-        console.log('saveProfile: about to POST /session to notify user doc of new profile');
-        // Use fetchWithAuth (will attach idToken) and include profile in body
-        const sessRes = await fetchWithAuth(`${SERVER_BASE}/session`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ idToken: getIdToken(), profile: serverProfile })
-        });
-        console.log('saveProfile: /session response', sessRes && sessRes.status);
-        if (sessRes && sessRes.ok) {
-          const sessJson = await sessRes.json().catch(()=>null);
-          console.log('saveProfile: /session returned', sessJson);
-          // mirror session result into officerProfiles map if it included org/profile
-          if (sessJson && sessJson.org) {
-            try {
-              const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-              const storeKey = sessJson.orgId || sessJson.org || (serverProfile.orgId || serverProfile.org) || newOrg;
-              pm[storeKey] = Object.assign({}, pm[storeKey] || {}, (sessJson.profile && typeof sessJson.profile === 'object') ? sessJson.profile : serverProfile, { org: sessJson.org, orgId: sessJson.orgId || pm[storeKey]?.orgId || storeKey });
-              localStorage.setItem("officerProfiles", JSON.stringify(pm));
-              try { localStorage.setItem('officerOrg', sessJson.org); } catch (e) {}
-              if (sessJson.orgId) try { localStorage.setItem('officerOrgId', sessJson.orgId); } catch (e) {}
-              if (sessJson.profile && sessJson.profile.username) try { localStorage.setItem('lastOfficerUsername', sessJson.profile.username); } catch (e) {}
-            } catch (e) {
-              console.warn('Failed to mirror /session response into localStorage:', e);
-            }
-          }
-        } else {
-          const t = sessRes ? await sessRes.text().catch(()=>'') : 'no-response';
-          console.debug('POST /session returned non-ok after profile upsert:', sessRes ? sessRes.status : 'no-res', t);
-        }
-      } catch (e) {
-        console.warn('POST /session call failed (non-fatal):', e);
-      }
-
-      // signal other tabs (same browser) to refresh org lists
-      try {
-        localStorage.setItem('orgsLastUpdated', String(Date.now()));
-      } catch (e) { /* ignore */ }
-
-      // Update UI from server result
-      const serverResult = serverProfile;
-      if (profileOrg) { profileOrg.value = serverResult.org || newOrg; profileOrg.readOnly = true; }
-      if (surnameInput) surnameInput.value = serverResult.name?.surname || profileObj.name.surname || "";
-      if (givenNameInput) givenNameInput.value = serverResult.name?.given || profileObj.name.given || "";
-      if (middleInitialInput) middleInitialInput.value = serverResult.name?.middle || profileObj.name.middle || "";
-      if (designationInput) designationInput.value = serverResult.designation || profileObj.designation || "";
-      if (yearSelect) yearSelect.value = serverResult.year || profileObj.year || "";
-      if (collegeSelect) collegeSelect.value = serverResult.college || profileObj.college || "";
-
-      // update departments/programs UI
-      if (departmentSelect) {
-        departmentSelect.innerHTML = '<option value="">-- Select Department --</option>';
-        if ((serverResult.college || profileObj.college) && collegeData[(serverResult.college || profileObj.college)]) {
-          Object.keys(collegeData[(serverResult.college || profileObj.college)]).forEach(dep => {
-            const opt = document.createElement("option"); opt.value = dep; opt.textContent = dep; departmentSelect.appendChild(opt);
-          });
-        }
-        departmentSelect.value = serverResult.department || profileObj.department || "";
-      }
-      if (programSelect) {
-        programSelect.innerHTML = '<option value="">-- Select Program --</option>';
-        const col = serverResult.college || profileObj.college;
-        const dep = serverResult.department || profileObj.department;
-        if (col && dep && collegeData[col] && collegeData[col][dep]) {
-          collegeData[col][dep].forEach(prog => {
-            const opt = document.createElement("option"); opt.value = prog; opt.textContent = prog; programSelect.appendChild(opt);
-          });
-        }
-        programSelect.value = serverResult.program || profileObj.program || "";
-      }
-
-      if (headerTitle) headerTitle.textContent = `Hello ${serverResult.org || newOrg}`;
-      if (officerNameSpan) officerNameSpan.textContent = serverResult.org || newOrg;
-
-      alert("Profile saved successfully.");
-      return;
-    } catch (e) {
-      console.error('saveProfile unexpected error:', e);
-      alert("An unexpected error occurred while saving profile. Check console for details.");
-    }
-
-    // Fallback local-only save (only if server path failed above)
-    try {
-      const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-      pm[newOrg] = Object.assign({}, pm[newOrg] || {}, profileObj);
-      localStorage.setItem("officerProfiles", JSON.stringify(pm));
-      try { localStorage.setItem("officerOrg", newOrg); } catch (e) {}
-      localStorage.setItem("officerProfile", JSON.stringify(profileObj)); // single-key fallback
-      if (profileObj.username) localStorage.setItem("lastOfficerUsername", profileObj.username);
-      if (headerTitle) headerTitle.textContent = `Hello ${profileObj.org}`;
-      if (officerNameSpan) officerNameSpan.textContent = profileObj.org;
-      alert("Profile saved locally (server unavailable).");
-    } catch (e) {
-      console.warn('Failed to save profile locally:', e);
-      alert("Failed to save profile. Check console.");
-    }
+    })();
   }
 
   function setProfileReadOnly(isReadOnly) {
@@ -710,11 +363,11 @@ document.addEventListener("DOMContentLoaded", () => {
         editSaveProfileBtn.textContent = "Save";
         if (cancelEditProfileBtn) cancelEditProfileBtn.classList.remove("hidden");
       } else {
-        // Save profile to per-org storage and upsert org on server (write-through)
+        // Save profile to per-org storage and upsert org on server
         saveProfile();
         setProfileReadOnly(true);
         editSaveProfileBtn.textContent = "Edit";
-        // NOTE: saveProfile will alert success/failure accordingly.
+        alert("Profile saved successfully!");
       }
     });
   }
@@ -801,23 +454,7 @@ document.addEventListener("DOMContentLoaded", () => {
       if (!res.ok) throw new Error(`Status ${res.status}`);
       const orgs = await res.json();
       if (!Array.isArray(orgs)) return [];
-      // normalize to {id, name, displayName}
-      const normalized = orgs.map(o => {
-        if (typeof o === 'string') return { id: o, name: o, displayName: o };
-        return { id: o.id || o.name || o.displayName || String(o), name: o.name || o.displayName || o.id || String(o), displayName: o.displayName || o.name || o.id || String(o) };
-      });
-      // client-side dedupe by canonical name (safe-guard)
-      const map = new Map();
-      normalized.forEach(o => {
-        const canon = String(o.name || '').trim().toLowerCase();
-        if (!canon) return;
-        if (!map.has(canon)) map.set(canon, o);
-        else {
-          const existing = map.get(canon);
-          if ((!existing.id || existing.id === existing.name) && o.id) map.set(canon, o);
-        }
-      });
-      return Array.from(map.values());
+      return orgs;
     } catch (err) {
       try {
         const localEvents = JSON.parse(localStorage.getItem("events") || "[]");
@@ -829,12 +466,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // Prefer fetching events by orgId when available (server supports ?orgId=)
-  async function fetchEventsForOrg(orgName, orgId = null) {
-    if (!orgName && !orgId) return [];
+  async function fetchEventsForOrg(orgName) {
+    if (!orgName) return [];
     try {
-      const url = orgId ? `${SERVER_BASE}/api/events?orgId=${encodeURIComponent(orgId)}` : `${SERVER_BASE}/api/events?org=${encodeURIComponent(orgName)}`;
-      const res = await fetch(url);
+      const res = await fetch(`${SERVER_BASE}/api/events?org=${encodeURIComponent(orgName)}`);
       if (!res.ok) throw new Error(`Status ${res.status}`);
       const events = await res.json();
       if (!Array.isArray(events)) return [];
@@ -842,7 +477,6 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (err) {
       try {
         const local = JSON.parse(localStorage.getItem("events") || "[]");
-        if (orgId) return local.filter(e => e.orgId === orgId || e.org === orgName);
         return local.filter(e => e.org === orgName);
       } catch (e) {
         return [];
@@ -878,27 +512,24 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!eventTableBody) return;
     eventTableBody.innerHTML = `<tr><td colspan="5" style="text-align:center;padding:18px">Loading events...</td></tr>`;
     const officerOrg = getCurrentOrg();
-    const officerOrgId = getCurrentOrgId();
 
     // Ensure org selection exists if missing: try to auto-set using server orgs
     if (!officerOrg) {
       try {
         const orgs = await fetchOrgsFromServer();
         if (orgs && orgs.length === 1) {
-          const o = orgs[0];
-          try { localStorage.setItem('officerOrg', o.name || o.displayName || o.id); } catch(e){}
-          if (o.id) try { localStorage.setItem('officerOrgId', o.id); } catch(e){}
+          localStorage.setItem('officerOrg', orgs[0].name || orgs[0].displayName || orgs[0].id);
         }
       } catch (e) { /* ignore */ }
     }
 
-    // Attempt to fetch server events for this org (prefer orgId)
+    // Attempt to fetch server events for this org
     let serverEvents = null;
-    if (officerOrg || officerOrgId) {
+    if (officerOrg) {
       try {
-        serverEvents = await fetchEventsForOrg(officerOrg, officerOrgId);
+        serverEvents = await fetchEventsForOrg(officerOrg);
       } catch (e) {
-        console.debug('fetchEventsForOrg failed (orgId or name):', e);
+        console.debug('fetchEventsForOrg failed:', e);
         serverEvents = null;
       }
     }
@@ -918,26 +549,25 @@ document.addEventListener("DOMContentLoaded", () => {
       // Update localStorage mirror: remove any local items that match server ids or name+org duplicates,
       // then insert server events so localStorage reflects server state (helps offline fallback later)
       try {
+        // Build map of server events by id and by name+org key
         const serverById = new Set(serverEvents.map(e => e.id).filter(Boolean));
         const serverByKey = new Set(serverEvents.map(e => `${(e.org||'').trim()}:::${(e.name||'').trim()}`));
+        // Filter out local events that match server items
         const filteredLocal = localEvents.filter(le => {
           if (le.id && serverById.has(le.id)) return false;
           const key = `${(le.org||'').trim()}:::${(le.name||'').trim()}`;
           if (serverByKey.has(key)) return false;
           return true;
         });
+        // Mirror: prepend server events to filteredLocal (so localStorage contains server copies + any offline-only local events)
         const mirrored = serverEvents.concat(filteredLocal);
         localStorage.setItem("events", JSON.stringify(mirrored));
       } catch (e) {
         console.warn('Failed to mirror server events to localStorage:', e);
       }
     } else {
-      // fallback to local events filtered by org or orgId
-      useEvents = localEvents.filter(ev => {
-        if (officerOrgId && ev.orgId) return ev.orgId === officerOrgId;
-        if (officerOrg) return ev.org === officerOrg;
-        return false;
-      });
+      // fallback to local events filtered by org
+      useEvents = localEvents.filter(ev => ev.org === officerOrg);
       source = 'local';
     }
 
@@ -1062,13 +692,19 @@ document.addEventListener("DOMContentLoaded", () => {
               const txt = await res.text().catch(()=> '');
               throw new Error(txt || `Status ${res.status}`);
             }
-            // remove any matching local mirror entries (by id)
+            // remove any matching local mirror entries (by id and by name+org)
             try {
               const locals = JSON.parse(localStorage.getItem("events") || "[]");
-              const filtered = (locals || []).filter(l => !(l.id && l.id === id));
+              const filtered = (locals || []).filter(l => {
+                if (l.id && l.id === id) return false;
+                if ((l.org || '') && (l.name || '')) {
+                  const keyLocal = `${(l.org||'').trim()}:::${(l.name||'').trim()}`;
+                  // We don't have server name here, so keep general: remove local entries with same id already handled.
+                  // Leave other local-only items.
+                }
+                return true;
+              });
               localStorage.setItem("events", JSON.stringify(filtered));
-              // notify same-browser tabs and signal a refresh point
-              try { localStorage.setItem('eventsLastUpdated', String(Date.now())); } catch(e) {}
             } catch (e) { console.warn('Failed to clean local mirror after server delete:', e); }
 
             alert('Deleted event from server.');
@@ -1084,8 +720,6 @@ document.addEventListener("DOMContentLoaded", () => {
           if (!confirm("Are you sure you want to delete this event?")) return;
           events.splice(globalIndex, 1);
           localStorage.setItem("events", JSON.stringify(events));
-          // notify same-browser tabs that events changed
-          try { localStorage.setItem('eventsLastUpdated', String(Date.now())); } catch(e) {}
           loadEvents();
           alert("Event deleted successfully!");
         }
@@ -1121,45 +755,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // ----------------------
   // Payments view: render table and stats
-  // - updated to prefer filtering by eventId (if available) and orgId (if available)
   // ----------------------
-  function renderVerifyPaymentsForEvent(eventName, eventId = null) {
+  function renderVerifyPaymentsForEvent(eventName) {
     const paymentHistory = JSON.parse(localStorage.getItem("paymentHistory") || "[]");
     if (!verifyTableBody) return;
     const officerOrg = getCurrentOrg();
-    const officerOrgId = getCurrentOrgId();
 
     (async () => {
       const all = await fetchAllPaymentsFromServer();
 
-      // Filter logic: prefer orgId/eventId when available (modern), fallback to names for legacy records
+      // Filter logic: server items may include purpose/name fields
       const serverFiltered = (all || []).filter(p => {
-        const matchesOrg = (officerOrgId && (p.orgId === officerOrgId || p.org_id === officerOrgId)) ||
-                           (p.org === officerOrg) || (p.purpose && p.purpose.startsWith(officerOrg)) || false;
-
-        let matchesEvent = false;
-        if (eventId) {
-          matchesEvent = (p.eventId === eventId) || (p.event_id === eventId) || (p.event === eventName);
-        } else {
-          matchesEvent = (p.event === eventName) || (p.purpose && p.purpose.includes(eventName)) || (p.name && p.name === eventName);
-        }
-
+        const matchesOrg = p.org === officerOrg || (p.purpose && p.purpose.startsWith(officerOrg)) || false;
+        const matchesEvent = p.event === eventName || (p.purpose && p.purpose.includes(eventName)) || (p.name && p.name === eventName);
         return matchesOrg && matchesEvent;
       });
 
       let toShow = serverFiltered;
       // fallback to localStorage if server returned nothing
       if ((!toShow || toShow.length === 0) && paymentHistory.length > 0) {
-        toShow = paymentHistory.filter(p => {
-          const matchesOrgLocal = (officerOrgId && (p.orgId === officerOrgId)) || p.org === officerOrg;
-          let matchesEventLocal = false;
-          if (eventId) {
-            matchesEventLocal = (p.eventId === eventId) || (p.event === eventName);
-          } else {
-            matchesEventLocal = p.event === eventName;
-          }
-          return matchesOrgLocal && matchesEventLocal;
-        });
+        toShow = paymentHistory.filter(p => p.org === officerOrg && p.event === eventName);
       }
 
       // compute stats
@@ -1169,7 +784,7 @@ document.addEventListener("DOMContentLoaded", () => {
         let approvedCount = 0;
         let sumApproved = 0;
         (toShow || []).forEach(p => {
-          const key = p.submittedByUid || p.submitted_by_uid || p.submittedByEmail || p.submitted_by_email || p.studentName || p.student || p.student_name || p.payerName || p.name || "Unknown";
+          const key = p.submittedByUid || p.submitted_by_uid || p.submittedByEmail || p.submitted_by_email || p.studentName || p.student || p.student_name || `${p.reference || ''}:${p.amount || ''}`;
           if (key) paidStudents.add(key);
           if (String(p.status || '').toLowerCase() === 'approved') {
             approvedCount++;
@@ -1366,7 +981,7 @@ document.addEventListener("DOMContentLoaded", () => {
       paymentHistory[idx].verifiedBy = localStorage.getItem("officerOrg") || profileOrg?.value || "Officer";
       paymentHistory[idx].verifiedAt = new Date().toISOString();
       localStorage.setItem("paymentHistory", JSON.stringify(paymentHistory));
-      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
+      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
       loadEvents();
       alert(`Payment status updated to "${newStatus}" (local)`);
       return;
@@ -1387,7 +1002,7 @@ document.addEventListener("DOMContentLoaded", () => {
           paymentHistory[idx] = Object.assign({}, paymentHistory[idx], updated);
           localStorage.setItem("paymentHistory", JSON.stringify(paymentHistory));
         }
-        if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
+        if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
         loadEvents();
         alert(`Payment marked ${newStatus}`);
         return;
@@ -1405,7 +1020,7 @@ document.addEventListener("DOMContentLoaded", () => {
             paymentHistory[idx] = Object.assign({}, paymentHistory[idx], updated);
             localStorage.setItem("paymentHistory", JSON.stringify(paymentHistory));
           }
-          if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
+          if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
           loadEvents();
           alert('Marked as Pending (server persisted)');
           return;
@@ -1422,13 +1037,13 @@ document.addEventListener("DOMContentLoaded", () => {
         paymentHistory[idxLocal].status = 'pending';
         localStorage.setItem("paymentHistory", JSON.stringify(paymentHistory));
       }
-      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
+      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
       loadEvents();
       alert('Marked as Pending (local update). To persist this change server-side, add a /api/payments/:id/unapprove endpoint on the server.');
     } catch (err) {
       console.error('Failed to update status via server:', err);
       alert('Failed to update status on server. Check console.');
-      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
+      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
     }
   }
 
@@ -1438,7 +1053,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (eventPaymentsHeading) eventPaymentsHeading.textContent = `Payments — ${eventObj.name}`;
     hide(eventsCard); hide(addEventForm); hide(profileForm); show(verifyPaymentsSection, "");
     ensureStatsElements();
-    renderVerifyPaymentsForEvent(eventObj.name, eventObj.id);
+    renderVerifyPaymentsForEvent(eventObj.name);
     try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch {}
   }
 
@@ -1675,7 +1290,6 @@ document.addEventListener("DOMContentLoaded", () => {
         deadline: eventDeadlineInput ? eventDeadlineInput.value : "",
         status: "Open",
         org: getCurrentOrg(),
-        orgId: getCurrentOrgId(),
         receiver: {
           number: receiverNumberInput ? receiverNumberInput.value : "",
           name: receiverNameInput ? receiverNameInput.value : "",
@@ -1690,8 +1304,7 @@ document.addEventListener("DOMContentLoaded", () => {
           if (newEventData.name) form.append('name', newEventData.name);
           form.append('fee', String(newEventData.fee || 0));
           if (newEventData.deadline) form.append('deadline', newEventData.deadline);
-          if (newEventData.orgId) form.append('orgId', newEventData.orgId);
-          else if (newEventData.org) form.append('org', newEventData.org);
+          if (newEventData.org) form.append('org', newEventData.org);
           // Include receiver metadata (without qr)
           const receiverMeta = Object.assign({}, newEventData.receiver);
           delete receiverMeta.qr;
@@ -1721,7 +1334,6 @@ document.addEventListener("DOMContentLoaded", () => {
             });
             filtered.unshift(updated);
             localStorage.setItem("events", JSON.stringify(filtered));
-            try { localStorage.setItem('eventsLastUpdated', String(Date.now())); } catch(e) {}
           } catch (e) {
             console.warn('Failed to update local mirror after PUT:', e);
           }
@@ -1754,8 +1366,7 @@ document.addEventListener("DOMContentLoaded", () => {
         form.append('name', newEventData.name || '');
         form.append('fee', String(newEventData.fee || 0));
         if (newEventData.deadline) form.append('deadline', newEventData.deadline);
-        if (newEventData.orgId) form.append('orgId', newEventData.orgId);
-        else if (newEventData.org) form.append('org', newEventData.org);
+        if (newEventData.org) form.append('org', newEventData.org);
 
         // Prepare receiver metadata and remove qr (we send qr as file)
         const receiverMeta = Object.assign({}, newEventData.receiver);
@@ -1792,14 +1403,12 @@ document.addEventListener("DOMContentLoaded", () => {
             });
             filtered.unshift(createdEvent);
             localStorage.setItem("events", JSON.stringify(filtered));
-            try { localStorage.setItem('eventsLastUpdated', String(Date.now())); } catch(e) {}
           } catch (e) {
             // fallback: just set created event as the only local event
             try {
               const local = JSON.parse(localStorage.getItem("events") || "[]");
               local.unshift(createdEvent);
               localStorage.setItem("events", JSON.stringify(local));
-              try { localStorage.setItem('eventsLastUpdated', String(Date.now())); } catch(e) {}
             } catch (e2) {
               console.warn('Failed to mirror created event locally:', e2);
             }
@@ -1818,14 +1427,10 @@ document.addEventListener("DOMContentLoaded", () => {
         // Fallback: preserve existing behavior (localStorage)
         if (editingEventIndex !== null && editingEventIndex !== undefined && editingEventIndex !== -1) {
           const allEvents = JSON.parse(localStorage.getItem("events") || "[]");
-          // if editing local, preserve orgId if present
-          if (allEvents[editingEventIndex] && newEventData.orgId) allEvents[editingEventIndex].orgId = newEventData.orgId;
           allEvents[editingEventIndex] = newEventData;
           localStorage.setItem("events", JSON.stringify(allEvents));
           editingEventIndex = null;
         } else {
-          // attach orgId to local event for future canonical mapping
-          if (newEventData.orgId) newEventData.orgId = newEventData.orgId;
           events.push(newEventData);
           localStorage.setItem("events", JSON.stringify(events));
         }
@@ -1850,24 +1455,10 @@ document.addEventListener("DOMContentLoaded", () => {
   // storage events to sync across tabs
   window.addEventListener("storage", (ev) => {
     if (!ev.key) return;
-    if (["paymentHistory","officerOrg","officerProfile","officerProfiles","events","orgsLastUpdated","officerOrgId","eventsLastUpdated"].includes(ev.key)) {
+    if (["paymentHistory","officerOrg","officerProfile","officerProfiles","events","orgsLastUpdated"].includes(ev.key)) {
       loadProfile();
       loadEvents();
-      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
-    }
-  });
-
-  // Re-fetch authoritative server state when the tab becomes visible
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      try {
-        // Refresh profile and events from server (loadProfile/loadEvents try server-first)
-        loadProfile();
-        loadEvents();
-        if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name, currentEventView.id);
-      } catch (e) {
-        console.warn('visibilitychange refresh failed:', e);
-      }
+      if (currentEventView) renderVerifyPaymentsForEvent(currentEventView.name);
     }
   });
 
