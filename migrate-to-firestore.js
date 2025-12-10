@@ -1,43 +1,23 @@
 // migrate-to-firestore.js
 // Run once to migrate local data.json -> Firestore
-// Usage:
-//   node migrate-to-firestore.js [--dry-run] [--no-backup]
+// Usage: node migrate-to-firestore.js [--dry-run] [--no-backup] [--dedupe-orgs]
 // Requirements: FIREBASE_SERVICE_ACCOUNT env var (path to JSON or JSON string).
 // This script writes to collections: organizations, events and payments, and will also create users/{uid}/payments docs where submittedByUid exists.
-// It will also populate orgId on events (by canonicalizing org names and upserting organizations).
-//
-// Behavior:
-// - By default it backups data.json -> data.json.bak.TIMESTAMP before modifying local file.
-// - --dry-run will print planned changes without writing to Firestore or modifying data.json.
-// - --no-backup skips the local backup step.
-//
-// Note: This script is conservative and attempts to preserve fields while adding orgId to events
-// and creating canonical organization docs. It deduplicates organizations by canonical name
-// (trim, lower-case, remove diacritics) and prefers existing org.id when present.
+// It will also populate orgId on events (and payments) by matching canonical organization names.
+// Options:
+//   --dry-run       : Do not modify files or write to Firestore; print intended changes.
+//   --no-backup     : Do not create a backup copy of data.json before modifying it (default is to create backup).
+//   --dedupe-orgs   : Merge duplicate organizations by canonicalName (remap events/payments to canonical id).
 
 const fs = require('fs');
 const path = require('path');
-
-function usageAndExit() {
-  console.log('Usage: node migrate-to-firestore.js [--dry-run] [--no-backup]');
-  process.exit(1);
-}
-
-function canonicalizeName(name) {
-  if (!name && name !== '') return '';
-  try {
-    // normalize NFKD and strip diacritics, trim and lower-case
-    const s = String(name || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
-    return s.trim().toLowerCase();
-  } catch (e) {
-    return String(name || '').trim().toLowerCase();
-  }
-}
+const { v4: uuidv4 } = require('uuid');
 
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
   const noBackup = args.includes('--no-backup');
+  const dedupeOrgs = args.includes('--dedupe-orgs');
 
   const svc = process.env.FIREBASE_SERVICE_ACCOUNT;
   if (!svc) {
@@ -59,9 +39,9 @@ async function main() {
 
   const admin = require('firebase-admin');
   try {
-    // initializeApp may already have been called in other contexts; catch that case
     admin.initializeApp({ credential: admin.credential.cert(serviceAccountObj) });
   } catch (err) {
+    // If initialized already in the same process, ignore
     if (!/already exists/u.test(String(err))) {
       console.error('Failed to initialize firebase-admin:', err);
       process.exit(1);
@@ -75,416 +55,252 @@ async function main() {
     process.exit(1);
   }
 
-  let raw;
-  try {
-    raw = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-  } catch (err) {
-    console.error('Failed to parse data.json:', err);
-    process.exit(1);
+  const raw = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+  raw.payments = Array.isArray(raw.payments) ? raw.payments : [];
+  raw.events = Array.isArray(raw.events) ? raw.events : [];
+  raw.organizations = Array.isArray(raw.organizations) ? raw.organizations : [];
+
+  console.log(`Found ${raw.organizations.length} organizations, ${raw.events.length} events, ${raw.payments.length} payments in ${DB_FILE}`);
+  if (dryRun) console.log('DRY RUN enabled - no files or Firestore writes will be performed.');
+
+  // helpers
+  function canonicalOrgName(name) {
+    try { return String(name || '').trim().toLowerCase(); } catch (e) { return String(name || '').trim(); }
   }
 
-  const payments = Array.isArray(raw.payments) ? raw.payments : [];
-  const events = Array.isArray(raw.events) ? raw.events : [];
-  const organizations = Array.isArray(raw.organizations) ? raw.organizations : [];
-  const officerProfilesLocal = raw.officerProfiles && typeof raw.officerProfiles === 'object' ? raw.officerProfiles : {};
-
-  console.log(`Loaded data.json: ${events.length} events, ${payments.length} payments, ${organizations.length} organizations (existing), ${Object.keys(officerProfilesLocal).length} officerProfiles (local).`);
-  if (dryRun) console.log('Running in dry-run mode — no writes to Firestore or data.json will be performed.');
-
-  // Build canonical org map from existing organizations (local) and from events fallback
-  const canonMap = new Map(); // canon -> { id, name, displayName, sources: { orgRecords: [], derivedFromEvents: [] }, createdAt }
-
-  // Seed from explicit organizations array
-  for (const o of organizations) {
-    const name = o && (o.name || o.displayName || o.id || '');
-    const canon = canonicalizeName(o && (o.canonicalName || name));
-    if (!canon) continue;
-    if (!canonMap.has(canon)) {
-      canonMap.set(canon, {
-        id: o.id || null,
-        name: o.name || o.displayName || o.id || '',
-        displayName: o.displayName || o.name || o.id || '',
-        createdAt: o.createdAt || null,
-        sourceRecords: [o],
-      });
-    } else {
-      const ex = canonMap.get(canon);
-      // prefer existing id or pick id if available
-      if (!ex.id && o.id) ex.id = o.id;
-      // prefer displayName if more expressive
-      if ((!ex.displayName || ex.displayName === ex.name) && o.displayName && o.displayName !== o.name) ex.displayName = o.displayName;
-      if ((!ex.name || ex.name === ex.displayName) && o.name && o.name !== o.displayName) ex.name = o.name;
-      if (!ex.createdAt && o.createdAt) ex.createdAt = o.createdAt;
-      ex.sourceRecords.push(o);
-    }
-  }
-
-  // Also derive org names from events to capture orgs not present in organizations[]
-  for (const ev of events) {
-    const name = ev && (ev.org || '');
-    const canon = canonicalizeName(name);
-    if (!canon) continue;
-    if (!canonMap.has(canon)) {
-      canonMap.set(canon, {
-        id: null,
-        name: name,
-        displayName: name,
-        createdAt: ev.createdAt || null,
-        sourceRecords: [],
-      });
-    } else {
-      // ensure we at least have a human-readable name
-      const ex = canonMap.get(canon);
-      if ((!ex.name || ex.name === ex.displayName) && name) ex.name = name;
-      if (!ex.displayName && name) ex.displayName = name;
-    }
-  }
-
-  // Summary counts
-  const canonicalEntries = Array.from(canonMap.entries()).map(([k, v]) => ({ canon: k, ...v }));
-  console.log(`Identified ${canonicalEntries.length} canonical organizations (after merging local/org-derived).`);
-
-  // Prepare to create orgs in Firestore (or reuse existing ids if present)
-  // We'll create a mapping canon -> orgId (string)
-  const canonToOrgId = new Map();
-  const createdOrgs = [];
-  const reusedOrgs = [];
-
-  // If dry-run, we just simulate IDs (generate random doc ids locally) but don't write to Firestore.
-  // Otherwise, we will upsert organization docs in Firestore using stored id when available (prefer).
-  for (const entry of canonicalEntries) {
-    let orgId = entry.id || null;
-
-    if (dryRun) {
-      if (!orgId) orgId = firestore.collection('organizations').doc().id; // generate id but do not write
-      canonToOrgId.set(entry.canon, orgId);
-      if (entry.id) reusedOrgs.push({ canon: entry.canon, id: orgId, name: entry.name });
-      else createdOrgs.push({ canon: entry.canon, id: orgId, name: entry.name });
-      continue;
-    }
-
-    // Real run: create or reuse in Firestore
+  function backupFile(filePath) {
     try {
-      if (orgId) {
-        // verify doc exists; if not, create with given id
-        const docRef = firestore.collection('organizations').doc(orgId);
-        const doc = await docRef.get();
-        if (doc.exists) {
-          // update/merge minimal fields
-          await docRef.set({
-            id: orgId,
-            name: entry.name,
-            displayName: entry.displayName || entry.name,
-            canonicalName: entry.canon,
-            createdAt: entry.createdAt || admin.firestore.FieldValue.serverTimestamp()
-          }, { merge: true });
-          canonToOrgId.set(entry.canon, orgId);
-          reusedOrgs.push({ canon: entry.canon, id: orgId, name: entry.name });
-        } else {
-          // create doc with provided id
-          await docRef.set({
-            id: orgId,
-            name: entry.name,
-            displayName: entry.displayName || entry.name,
-            canonicalName: entry.canon,
-            createdAt: entry.createdAt || admin.firestore.FieldValue.serverTimestamp()
-          }, { merge: true });
-          canonToOrgId.set(entry.canon, orgId);
-          createdOrgs.push({ canon: entry.canon, id: orgId, name: entry.name });
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const dest = `${filePath}.bak.${ts}`;
+      fs.copyFileSync(filePath, dest);
+      console.log(`Backed up ${filePath} -> ${dest}`);
+    } catch (e) {
+      console.warn('Failed to create backup of', filePath, e);
+    }
+  }
+
+  // Build canonical org map from raw.organizations
+  const orgsByCanon = new Map(); // canon -> canonical org (first encountered)
+  const duplicatesByCanon = new Map(); // canon -> [org,...] (all)
+  for (const o of raw.organizations) {
+    const canon = canonicalOrgName(o.name || o.displayName || o.id || '');
+    if (!orgsByCanon.has(canon)) {
+      orgsByCanon.set(canon, Object.assign({}, o));
+      duplicatesByCanon.set(canon, [o]);
+    } else {
+      duplicatesByCanon.get(canon).push(o);
+    }
+  }
+
+  // Optionally dedupe organizations (in-memory remap)
+  const remapOrgId = {}; // oldId -> canonicalId
+  if (dedupeOrgs) {
+    console.log('Deduplicating organizations by canonicalName...');
+    for (const [canon, list] of duplicatesByCanon.entries()) {
+      if (!list || list.length <= 1) continue;
+      const canonical = list[0];
+      for (let i = 1; i < list.length; i++) {
+        const dup = list[i];
+        if (dup && dup.id && canonical && canonical.id) {
+          remapOrgId[dup.id] = canonical.id;
         }
-      } else {
-        // no id present -> create new doc with generated id
-        const docRef = firestore.collection('organizations').doc();
-        orgId = docRef.id;
-        await docRef.set({
-          id: orgId,
-          name: entry.name,
-          displayName: entry.displayName || entry.name,
-          canonicalName: entry.canon,
-          createdAt: entry.createdAt || admin.firestore.FieldValue.serverTimestamp()
-        }, { merge: true });
-        canonToOrgId.set(entry.canon, orgId);
-        createdOrgs.push({ canon: entry.canon, id: orgId, name: entry.name });
-      }
-    } catch (err) {
-      console.error('Failed to create/upsert organization in Firestore for canon:', entry.canon, err);
-      // still map a generated id locally to allow event mapping to proceed
-      try {
-        if (!orgId) orgId = firestore.collection('organizations').doc().id;
-        canonToOrgId.set(entry.canon, orgId);
-      } catch (e) {
-        // fallback: leave unmapped
       }
     }
-  }
-
-  // Report planned/actual org operations
-  console.log(`Organizations: will create ${createdOrgs.length} and reuse ${reusedOrgs.length} (dryRun=${dryRun}).`);
-  if (dryRun) {
-    createdOrgs.forEach(o => console.log('  [DRY] create org:', o.id, o.name));
-    reusedOrgs.forEach(o => console.log('  [DRY] reuse org:', o.id, o.name));
-  }
-
-  // Next: update events to include orgId (mapping by canonical name). Also normalize event.org to canonical displayName.
-  let eventsUpdated = 0;
-  const updatedEventsForWrite = [];
-  for (const ev of events) {
-    const orgName = ev && (ev.org || '');
-    const canon = canonicalizeName(orgName);
-    const mappedOrgId = canonToOrgId.get(canon) || null;
-    if (mappedOrgId && (!ev.orgId || ev.orgId !== mappedOrgId)) {
-      ev.orgId = mappedOrgId;
-      // also normalize human-readable org name to the canonical displayName if available
-      const orgEntry = canonicalEntries.find(e => e.canon === canon);
-      if (orgEntry && orgEntry.name) ev.org = orgEntry.name;
-      eventsUpdated++;
-    } else if (!ev.orgId && mappedOrgId) {
-      ev.orgId = mappedOrgId;
-      eventsUpdated++;
+    const dupCount = Object.keys(remapOrgId).length;
+    console.log(`Found ${dupCount} duplicate organization ids to remap.`);
+    // Apply remap to raw.events and raw.payments (events may not yet have orgId)
+    let remappedEvents = 0;
+    for (const ev of raw.events) {
+      if (ev.orgId && remapOrgId[ev.orgId]) {
+        ev.orgId = remapOrgId[ev.orgId];
+        remappedEvents++;
+      }
     }
-    updatedEventsForWrite.push(ev);
+    let remappedPayments = 0;
+    for (const p of raw.payments) {
+      if (p.orgId && remapOrgId[p.orgId]) {
+        p.orgId = remapOrgId[p.orgId];
+        remappedPayments++;
+      }
+    }
+    console.log(`Applied remap to ${remappedEvents} events and ${remappedPayments} payments (by orgId).`);
+
+    // Remove duplicate org entries from raw.organizations (keep canonical entries)
+    const canonSet = new Set(Array.from(orgsByCanon.keys()));
+    const canonicalIds = new Set(Array.from(orgsByCanon.values()).map(o => o.id));
+    const filteredOrgs = [];
+    const seenCanon = new Set();
+    for (const o of raw.organizations) {
+      const c = canonicalOrgName(o.name || o.displayName || o.id || '');
+      if (!seenCanon.has(c)) {
+        filteredOrgs.push(orgsByCanon.get(c)); // canonical object
+        seenCanon.add(c);
+      } // else skip duplicates
+    }
+    raw.organizations = filteredOrgs;
+    console.log(`Reduced organizations to ${raw.organizations.length} canonical records.`);
   }
 
-  console.log(`Events: ${eventsUpdated} events will be updated with orgId (dryRun=${dryRun}).`);
+  // Ensure events have orgId where possible; create orgs for unmatched names.
+  let createdOrgsForEvents = 0;
+  let updatedEventsWithOrgId = 0;
+  // rebuild org lookup by canonical name (since dedupe or creations may have modified raw.organizations)
+  const orgLookupByCanon = {};
+  for (const o of raw.organizations) {
+    const c = canonicalOrgName(o.name || o.displayName || '');
+    if (c) orgLookupByCanon[c] = o;
+  }
 
-  // -----------------------
-  // Build event lookup to help map legacy payments to eventId
-  // -----------------------
-  const eventLookupByOrgAndName = new Map(); // key = `${orgId||canonOrgName}:::${eventName}` -> eventId
-  updatedEventsForWrite.forEach(ev => {
-    const evName = ev && ev.name ? ev.name : '';
-    if (!evName) return;
+  for (const ev of raw.events) {
+    // if event already has orgId, continue
     if (ev.orgId) {
-      eventLookupByOrgAndName.set(`${ev.orgId}:::${evName}`, ev.id);
-    }
-    if (ev.org) {
-      const canonOrg = canonicalizeName(ev.org);
-      if (canonOrg) eventLookupByOrgAndName.set(`${canonOrg}:::${evName}`, ev.id);
-    }
-  });
-
-  // -----------------------
-  // Payments mapping: attempt to set orgId and eventId on legacy payments when possible
-  // - prefer existing payment.orgId/eventId
-  // - if missing orgId, try map from canonical org name using canonToOrgId
-  // - if missing eventId, try find event by (orgId,eventName) or (canonOrgName,eventName)
-  // This improves later filtering and prevents split payments for duplicate names.
-  // -----------------------
-  let paymentsMappedCount = 0;
-  const paymentsToWrite = [];
-  for (const p of payments) {
-    const copy = Object.assign({}, p);
-    const payOrgName = p.org || '';
-    const payCanon = canonicalizeName(payOrgName);
-    // prefer existing orgId in payment
-    if (!copy.orgId) {
-      const mapped = (payCanon && canonToOrgId.has(payCanon)) ? canonToOrgId.get(payCanon) : null;
-      if (mapped) {
-        copy.orgId = mapped;
-        paymentsMappedCount++;
+      // if remap should be applied
+      if (remapOrgId[ev.orgId]) {
+        ev.orgId = remapOrgId[ev.orgId];
+        updatedEventsWithOrgId++;
       }
-    }
-    // attempt to map eventId
-    if (!copy.eventId) {
-      const evName = p.event || p.name || (p.purpose || '').split('|').pop()?.trim() || '';
-      if (evName) {
-        let found = false;
-        if (copy.orgId) {
-          const key = `${copy.orgId}:::${evName}`;
-          if (eventLookupByOrgAndName.has(key)) {
-            copy.eventId = eventLookupByOrgAndName.get(key);
-            paymentsMappedCount++;
-            found = true;
-          }
-        }
-        if (!found && payCanon) {
-          const key2 = `${payCanon}:::${evName}`;
-          if (eventLookupByOrgAndName.has(key2)) {
-            copy.eventId = eventLookupByOrgAndName.get(key2);
-            paymentsMappedCount++;
-            found = true;
-          }
-        }
-      }
-    }
-    paymentsToWrite.push(copy);
-  }
-
-  if (dryRun) {
-    console.log(`Payments mapping (dry-run): ${paymentsMappedCount} payments would be updated with orgId/eventId when possible.`);
-  }
-
-  // -----------------------
-  // OfficerProfiles migration:
-  // - read raw.officerProfiles (object keyed by orgName or orgId)
-  // - map each to a canonical Firestore docId: prefer mapped orgId (from canonToOrgId) else use canonical org name
-  // - upsert to Firestore collection 'officerProfiles' (doc id = chosen key)
-  // - build newOfficerProfiles map keyed by chosen doc ids for writing back into data.json
-  // -----------------------
-  const localOfficerKeys = Object.keys(officerProfilesLocal || {});
-  const officerProfilesPlan = {
-    total: localOfficerKeys.length,
-    mapped: 0,
-    upsertsDry: [],
-    upsertsReal: [],
-    failures: []
-  };
-
-  const newOfficerProfilesMap = {}; // will be written to data.json (keyed by docId)
-
-  for (const localKey of localOfficerKeys) {
-    const profile = officerProfilesLocal[localKey] || {};
-    // profile may contain org, orgId, etc.
-    const profileOrgName = profile.org || localKey || '';
-    const canon = canonicalizeName(profileOrgName);
-    // Prefer orgId from profile, else mapping from canonToOrgId
-    const mappedOrgId = (profile.orgId && String(profile.orgId)) ? String(profile.orgId) : (canon ? (canonToOrgId.get(canon) || null) : null);
-    // choose doc id: prefer orgId else canonical name (fallback to localKey)
-    let docId = mappedOrgId || (canon ? canon : String(localKey));
-    // Ensure docId is non-empty; if empty and firestore available, generate an id
-    if (!docId) {
-      try {
-        docId = firestore.collection('officerProfiles').doc().id;
-      } catch (e) {
-        docId = String(localKey || Date.now());
-      }
-    }
-
-    // Merge profile with canonical fields we can determine
-    const mergedProfile = Object.assign({}, profile, {
-      org: profile.org || (mappedOrgId ? profileOrgName : profile.org) || profileOrgName || '',
-      orgId: mappedOrgId || profile.orgId || null,
-      updatedAt: new Date().toISOString()
-    });
-
-    if (dryRun) {
-      officerProfilesPlan.upsertsDry.push({ localKey, docId, mergedProfile });
-      officerProfilesPlan.mapped++;
-      // prepare newOfficerProfilesMap in dry-run so summary is visible
-      newOfficerProfilesMap[docId] = mergedProfile;
       continue;
     }
 
-    // Real run: attempt Firestore upsert
-    try {
-      await firestore.collection('officerProfiles').doc(String(docId)).set(mergedProfile, { merge: true });
-      officerProfilesPlan.upsertsReal.push({ localKey, docId });
-      newOfficerProfilesMap[docId] = mergedProfile;
-      officerProfilesPlan.mapped++;
-    } catch (err) {
-      console.error('Failed to upsert officer profile to Firestore for', localKey, '->', docId, err);
-      officerProfilesPlan.failures.push({ localKey, docId, error: String(err) });
-      // still write to newOfficerProfilesMap locally so we don't lose the profile in data.json
-      newOfficerProfilesMap[docId] = mergedProfile;
+    const eventOrgName = ev.org || ev.organization || '';
+    const canon = canonicalOrgName(eventOrgName || '');
+    if (!canon) continue;
+
+    let orgObj = orgLookupByCanon[canon];
+    if (!orgObj) {
+      // create new org record locally
+      const newOrg = {
+        id: uuidv4(),
+        name: eventOrgName || canon,
+        canonicalName: canon,
+        displayName: eventOrgName || canon,
+        logoUrl: null,
+        contactEmail: null,
+        metadata: {},
+        createdAt: new Date().toISOString()
+      };
+      raw.organizations.unshift(newOrg);
+      orgLookupByCanon[canon] = newOrg;
+      orgObj = newOrg;
+      createdOrgsForEvents++;
+      if (!dryRun) console.log(`Created org for event org="${eventOrgName}" -> id=${newOrg.id}`);
     }
+    ev.orgId = orgObj.id;
+    // keep human-readable ev.org as-is for compatibility
+    updatedEventsWithOrgId++;
   }
 
-  if (dryRun) {
-    console.log('OfficerProfiles dry-run plan:');
-    console.log(`  total local profiles: ${officerProfilesPlan.total}`);
-    console.log(`  mapped profiles: ${officerProfilesPlan.mapped}`);
-    officerProfilesPlan.upsertsDry.forEach(p => {
-      console.log(`  [DRY] localKey="${p.localKey}" -> docId="${p.docId}"`);
-    });
-  } else {
-    console.log(`OfficerProfiles: upserted ${officerProfilesPlan.upsertsReal.length} profiles to Firestore; ${officerProfilesPlan.failures.length} failures.`);
-    if (officerProfilesPlan.failures.length > 0) {
-      officerProfilesPlan.failures.forEach(f => {
-        console.warn('  failure:', f.localKey, '->', f.docId, f.error);
-      });
-    }
+  // Also attempt to populate payment.orgId from payment.org (if present)
+  let updatedPaymentsWithOrgId = 0;
+  for (const p of raw.payments) {
+    if (p.orgId) continue;
+    const payOrgName = p.org || '';
+    const canon = canonicalOrgName(payOrgName || '');
+    if (!canon) continue;
+    const orgObj = orgLookupByCanon[canon];
+    if (orgObj) { p.orgId = orgObj.id; updatedPaymentsWithOrgId++; }
   }
 
-  // Payments: no changes to org mapping currently, but we will write payments to Firestore as before.
-  // Backup local data.json unless disabled
+  console.log(`Will populate orgId on ${updatedEventsWithOrgId} events and ${updatedPaymentsWithOrgId} payments. Created ${createdOrgsForEvents} new org records for unmatched event names.`);
+
+  // Backup local file if needed
   if (!dryRun && !noBackup) {
     try {
-      const bakName = `data.json.bak.${Date.now()}`;
-      fs.copyFileSync(DB_FILE, path.join(__dirname, bakName));
-      console.log('Created backup:', bakName);
-    } catch (err) {
-      console.warn('Failed to create backup, continuing:', err);
+      backupFile(DB_FILE);
+    } catch (e) {
+      console.warn('Backup step failed:', e);
     }
-  } else if (dryRun) {
-    console.log('Dry-run: skipping backup.');
-  } else if (noBackup) {
-    console.log('--no-backup specified: not creating a backup.');
   }
 
-  // If not dry-run, write updated local data.json (events updated, organizations canonicalized, officerProfiles normalized)
+  // If not dry-run, persist updated local data.json (with new orgs and orgId fields)
   if (!dryRun) {
     try {
-      // Build canonical organizations array from canonToOrgId and canonicalEntries
-      const orgsOut = canonicalEntries.map(e => {
-        return {
-          id: canonToOrgId.get(e.canon) || e.id || null,
-          name: e.name || e.displayName || '',
-          displayName: e.displayName || e.name || '',
-          canonicalName: e.canon,
-          createdAt: e.createdAt || null
-        };
-      });
-
-      const out = Object.assign({}, raw, {
-        events: updatedEventsForWrite,
-        organizations: orgsOut,
-        officerProfiles: newOfficerProfilesMap
-      });
-      fs.writeFileSync(DB_FILE, JSON.stringify(out, null, 2));
-      console.log('Updated local data.json with orgId on events, canonical organizations, and normalized officerProfiles.');
-    } catch (err) {
-      console.error('Failed to write updated data.json:', err);
+      fs.writeFileSync(DB_FILE, JSON.stringify(raw, null, 2));
+      console.log(`Wrote updated ${DB_FILE} with orgId populated (and canonical organizations).`);
+    } catch (e) {
+      console.error('Failed to write updated data.json:', e);
+      process.exit(1);
     }
   } else {
-    console.log('Dry-run: not writing data.json changes.');
+    console.log('Dry-run: not writing updates to data.json.');
   }
 
-  // Finally push events and payments to Firestore (if not dry-run)
-  if (dryRun) {
-    console.log('Dry-run complete. Summary:');
-    console.log(`  Organizations to create: ${createdOrgs.length}`);
-    console.log(`  Organizations to reuse: ${reusedOrgs.length}`);
-    console.log(`  Events to update with orgId: ${eventsUpdated} / ${events.length}`);
-    console.log(`  Payments to write: ${payments.length}`);
-    console.log(`  Payments that would be mapped with orgId/eventId: ${paymentsMappedCount}`);
-    console.log(`  OfficerProfiles to upsert: ${officerProfilesPlan.mapped}`);
-    process.exit(0);
-  }
+  // Now migrate to Firestore
+  console.log(`Migrating to Firestore${dryRun ? ' (DRY RUN - no writes)' : ''}...`);
 
-  // Real write: events
-  console.log('Writing events to Firestore...');
-  for (const ev of updatedEventsForWrite) {
-    const id = ev.id || firestore.collection('events').doc().id;
-    try {
-      await firestore.collection('events').doc(id).set(Object.assign({}, ev, { id }), { merge: true });
-      console.log('Wrote event', id, ev.name || '');
-    } catch (err) {
-      console.error('Failed to write event', id, err);
-    }
-  }
-
-  // Payments
-  console.log('Writing payments to Firestore (and per-user subcollections)...');
-  for (const p of paymentsToWrite) {
-    const id = p.id || firestore.collection('payments').doc().id;
-    try {
-      // ensure an id field exists in the object being written
-      const toWrite = Object.assign({}, p, { id });
-      await firestore.collection('payments').doc(id).set(toWrite, { merge: true });
-      console.log('Wrote payment', id, p.reference || p.name || '');
-      if (p.submittedByUid) {
-        try {
-          await firestore.collection('users').doc(p.submittedByUid).collection('payments').doc(id).set(toWrite, { merge: true });
-        } catch (err) {
-          console.warn('Failed to create per-user payment doc for', p.submittedByUid, id, err);
-        }
+  // Write organizations to Firestore
+  let orgsWritten = 0;
+  for (const o of raw.organizations) {
+    const id = o.id || uuidv4();
+    const doc = Object.assign({}, o, { id });
+    if (!dryRun) {
+      try {
+        await firestore.collection('organizations').doc(id).set(doc, { merge: true });
+        orgsWritten++;
+      } catch (err) {
+        console.error('Failed to write organization to Firestore:', id, err);
       }
-    } catch (err) {
-      console.error('Failed to write payment', id, err);
+    } else {
+      console.log(`[DRY] Would write organization id=${id} name="${o.name}"`);
     }
   }
 
-  console.log('Migration to Firestore completed successfully.');
+  // Events
+  let eventsWritten = 0;
+  for (const ev of raw.events) {
+    const id = ev.id || uuidv4();
+    const toWrite = Object.assign({}, ev, { id });
+    if (!dryRun) {
+      try {
+        await firestore.collection('events').doc(id).set(toWrite, { merge: true });
+        eventsWritten++;
+        console.log('Migrated event', id, ev.name || '');
+      } catch (err) {
+        console.error('Failed to migrate event', id, err);
+      }
+    } else {
+      console.log(`[DRY] Would migrate event ${id} "${ev.name || ''}" (orgId=${ev.orgId || ''})`);
+    }
+  }
+
+  // Payments (and per-user subcollections)
+  let paymentsWritten = 0;
+  for (const p of raw.payments) {
+    const id = p.id || uuidv4();
+    const toWrite = Object.assign({}, p, { id });
+    if (!dryRun) {
+      try {
+        await firestore.collection('payments').doc(id).set(toWrite, { merge: true });
+        paymentsWritten++;
+        if (p.submittedByUid) {
+          try {
+            await firestore.collection('users').doc(p.submittedByUid).collection('payments').doc(id).set(toWrite, { merge: true });
+          } catch (err) {
+            console.warn('Failed to create per-user payment doc for', p.submittedByUid, id, err);
+          }
+        }
+        console.log('Migrated payment', id, p.reference || p.name || '');
+      } catch (err) {
+        console.error('Failed to migrate payment', id, err);
+      }
+    } else {
+      console.log(`[DRY] Would migrate payment ${id} reference="${p.reference || ''}" submittedByUid=${p.submittedByUid || ''}`);
+    }
+  }
+
+  console.log('Migration summary:');
+  if (!dryRun) {
+    console.log(`  Organizations written: ${orgsWritten}`);
+    console.log(`  Events written:        ${eventsWritten}`);
+    console.log(`  Payments written:      ${paymentsWritten}`);
+    console.log('Migration completed.');
+  } else {
+    console.log(`  (DRY RUN) Organizations to write: approx ${raw.organizations.length}`);
+    console.log(`  (DRY RUN) Events to write: approx ${raw.events.length}`);
+    console.log(`  (DRY RUN) Payments to write: approx ${raw.payments.length}`);
+    console.log('Dry-run completed. No writes performed.');
+  }
+
   process.exit(0);
 }
 
