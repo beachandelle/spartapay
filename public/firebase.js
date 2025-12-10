@@ -2,8 +2,6 @@
 // - Browser ES module for Firebase Auth (no require())
 // - Keeps client idToken and profile in localStorage
 // - Calls POST /session after sign-in to upsert the user on the server
-// - Added: map known officer emails to their organization and persist officerOrg/officerProfiles
-//   (keeps the previous behavior and demo fallback intact)
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
 import {
@@ -11,8 +9,7 @@ import {
   GoogleAuthProvider,
   signInWithPopup,
   signOut,
-  onAuthStateChanged,
-  signInWithEmailAndPassword
+  onAuthStateChanged
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
 // Firebase configuration (keep this as-is for your project)
@@ -48,74 +45,17 @@ async function callServerSession(idToken) {
       body: JSON.stringify({ idToken })
     });
     if (!res.ok) {
-      const txt = await res.text().catch(()=>'');
+      const txt = await res.text();
       console.warn('/session returned non-OK:', res.status, txt);
       return null;
     }
     const json = await res.json();
     if (json.uid) localStorage.setItem("spartapay_uid", json.uid);
     if (json.role) localStorage.setItem("spartapay_role", json.role);
-
-    // If server returned authoritative org/profile, persist them locally so all devices use authoritative mapping
-    try {
-      if (json.org) {
-        // profile may be present or not; if present prefer it
-        const profileFromServer = json.profile && typeof json.profile === 'object' ? json.profile : {};
-        persistOfficerOrgToLocalStorage(json.org, profileFromServer);
-      } else if (json.profile && typeof json.profile === 'object') {
-        // If server returned profile but not top-level org, still store profile keys (useful for students)
-        try {
-          if (json.profile.displayName) localStorage.setItem("studentName", json.profile.displayName);
-          if (json.profile.email) localStorage.setItem("studentEmail", json.profile.email);
-          if (json.profile.photoURL) localStorage.setItem("studentPhotoURL", json.profile.photoURL);
-        } catch (e) {
-          // ignore
-        }
-      } else {
-        // If server returned nothing about org/profile, explicitly remove officerOrg for this newly-signed-in user
-        // so we don't keep a stale org from a previous login.
-        try {
-          // Do not remove the entire officerProfiles map (that's a cache); just clear the active session's officerOrg and single-key profile
-          localStorage.removeItem('officerOrg');
-          localStorage.removeItem('officerProfile');
-          localStorage.removeItem('officerOrgId');
-        } catch (e) { /* ignore */ }
-      }
-    } catch (e) {
-      console.warn('Failed to persist server session org/profile locally:', e);
-    }
-
     return json;
   } catch (err) {
     console.error("Failed to POST /session", err);
     return null;
-  }
-}
-
-// Small helper: persist officer organization mapping into localStorage structures
-function persistOfficerOrgToLocalStorage(orgName, profileInfo = {}) {
-  if (!orgName) return;
-  try {
-    // Save explicit current org (overwrite any stale value)
-    localStorage.setItem("officerOrg", orgName);
-
-    // Build or merge into officerProfiles map
-    const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-    pm[orgName] = Object.assign({}, pm[orgName] || {}, profileInfo, { org: orgName });
-    localStorage.setItem("officerProfiles", JSON.stringify(pm));
-
-    // Keep single-key compatibility
-    try { localStorage.setItem("officerProfile", JSON.stringify(pm[orgName])); } catch (e) {}
-
-    // Save a lastOfficerUsername if provided
-    if (profileInfo && profileInfo.username) {
-      try { localStorage.setItem("lastOfficerUsername", profileInfo.username); } catch (e) {}
-    }
-
-    // Mark role locally (useful for UI)
-    try { localStorage.setItem("spartapay_role", "officer"); } catch (e) {}
-  } catch (e) {
-    console.warn('persistOfficerOrgToLocalStorage failed:', e);
   }
 }
 
@@ -127,54 +67,25 @@ onAuthStateChanged(auth, async (user) => {
       const token = await user.getIdToken(true);
       localStorage.setItem("idToken", token);
 
-      // Clear any stale per-session org/profile before we handle the newly-signed-in user.
-      // This prevents a previous officerOrg from sticking around across sign-ins.
-      try {
-        localStorage.removeItem('officerOrg');
-        localStorage.removeItem('officerProfile');
-        localStorage.removeItem('officerOrgId');
-      } catch (e) { /* ignore */ }
-
-      // Call server to create/update Firestore user doc and capture server response (authoritative org/profile)
-      try {
-        const sessionJson = await callServerSession(token);
-        if (sessionJson) {
-          // If server returned profile, mirror basic UI keys
-          if (sessionJson.profile && typeof sessionJson.profile === 'object') {
-            try {
-              if (sessionJson.profile.displayName) localStorage.setItem("studentName", sessionJson.profile.displayName);
-              if (sessionJson.profile.email) localStorage.setItem("studentEmail", sessionJson.profile.email);
-              if (sessionJson.profile.photoURL) localStorage.setItem("studentPhotoURL", sessionJson.profile.photoURL);
-            } catch (e) { /* ignore */ }
-          }
-          // If server returned org, persistOfficerOrgToLocalStorage already called inside callServerSession
-        }
-      } catch (e) {
-        console.warn('callServerSession failed from onAuthStateChanged:', e);
-      }
+      // Call server to create/update Firestore user doc
+      await callServerSession(token);
     } catch (err) {
       console.error("Failed to retrieve idToken in onAuthStateChanged:", err);
       localStorage.removeItem("idToken");
     }
 
-    // Basic profile info for UI (fallback to firebase user if server didn't provide)
-    localStorage.setItem("studentName", user.displayName || localStorage.getItem("studentName") || "");
-    localStorage.setItem("studentEmail", user.email || localStorage.getItem("studentEmail") || "");
-    localStorage.setItem("studentPhotoURL", user.photoURL || localStorage.getItem("studentPhotoURL") || "");
+    // Basic profile info for UI
+    localStorage.setItem("studentName", user.displayName || "");
+    localStorage.setItem("studentEmail", user.email || "");
+    localStorage.setItem("studentPhotoURL", user.photoURL || "");
   } else {
-    // Signed out — remove client-side stored pieces including per-session officer keys
+    // Signed out — remove client-side stored pieces
     localStorage.removeItem("idToken");
     localStorage.removeItem("studentName");
     localStorage.removeItem("studentEmail");
     localStorage.removeItem("studentPhotoURL");
     localStorage.removeItem("spartapay_uid");
     localStorage.removeItem("spartapay_role");
-    // remove per-session officer keys so next login doesn't inherit previous org
-    localStorage.removeItem("officerOrg");
-    localStorage.removeItem("officerProfile");
-    localStorage.removeItem("officerOrgId");
-    localStorage.removeItem("officerLoggedIn");
-    // keep officerProfiles map (cache) intact
   }
 });
 
@@ -222,18 +133,9 @@ document.addEventListener("DOMContentLoaded", () => {
         localStorage.setItem("studentEmail", user.email || "");
         localStorage.setItem("studentPhotoURL", user.photoURL || "");
 
-        // Call server session to upsert user in Firestore and use response if available
+        // Call server session to upsert user in Firestore
         if (token) {
-          try {
-            const sessionJson = await callServerSession(token);
-            if (sessionJson && sessionJson.profile && typeof sessionJson.profile === 'object') {
-              if (sessionJson.profile.displayName) localStorage.setItem("studentName", sessionJson.profile.displayName);
-              if (sessionJson.profile.email) localStorage.setItem("studentEmail", sessionJson.profile.email);
-              if (sessionJson.profile.photoURL) localStorage.setItem("studentPhotoURL", sessionJson.profile.photoURL);
-            }
-          } catch (e) {
-            console.warn('callServerSession failed after Google sign-in:', e);
-          }
+          await callServerSession(token);
         }
 
         // Redirect to the dashboard (client will read localStorage for profile and token)
@@ -257,149 +159,63 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   };
 
-  // Known officer-email -> org mapping
-  // You can extend this list or move it to a server-side mapping if you prefer.
-  const officerEmailToOrg = {
-    "jiecep@officer.com": "JIECEP",
-    "aeess@officer.com": "AeESS",
-    "aices@officer.com": "AICES",
-    "mexess@officer.com": "MEXESS",
-    "abmes@officer.com": "ABMES"
-  };
-
-  // Small helper to infer org from email prefix if explicit mapping missing
-  function inferOrgFromEmail(email) {
-    if (!email || typeof email !== 'string') return "";
-    const local = email.split('@')[0] || "";
-    // Try to convert typical patterns to org name: jiecep -> JIECEP, mexess -> MEXESS, etc.
-    const cleaned = local.replace(/[_\.\-]/g, '').toUpperCase();
-    // If cleaned looks like an acronym/short name we expect, return it
-    if (cleaned.length >= 3 && cleaned.length <= 10) return cleaned;
-    return "";
-  }
-
-  // OFFICER LOGIN (Firebase email/password preferred, fallback to manual demo array)
+  // OFFICER LOGIN (Manual)
   const loginBtn = document.getElementById("loginBtn");
   if (loginBtn) {
-    loginBtn.addEventListener("click", async () => {
+    loginBtn.addEventListener("click", () => {
       const username = (document.getElementById("email")?.value || "").trim();
       const password = (document.getElementById("password")?.value || "").trim();
 
-      if (!username || !password) {
-        alert("Please enter username/email and password.");
-        return;
-      }
+      // Hard-coded demo officer accounts (DEV ONLY)
+      const officers = [
+        { username: "jiecep_officer", password: "jiecep123", name: "JIECEP Officer", org: "JIECEP" },
+        { username: "aeess_officer", password: "aeess123", name: "AeESS Officer", org: "AeESS" },
+        { username: "aices_officer", password: "aices123", name: "AICES Officer", org: "AICES" },
+        { username: "mexess_officer", password: "mexess123", name: "MEXESS Officer", org: "MEXESS" },
+        { username: "abmes_officer", password: "abmes123", name: "ABMES Officer", org: "ABMES" }
+      ];
 
-      // Map short usernames (if UI uses them) to an email address — ensure such email exists in Firebase Auth
-      const email = username.includes("@") ? username : `${username}@officer.com`;
+      const officer = officers.find(o => o.username === username && o.password === password);
 
-      // Try Firebase email/password sign-in first (preferred)
-      try {
-        const cred = await signInWithEmailAndPassword(auth, email, password);
-        const user = cred.user;
+      if (officer) {
+        // Build the minimal profile we get from login
+        const loginProfile = {
+          username: officer.username,
+          name: officer.name,
+          org: officer.org
+        };
 
-        // Get fresh token and persist
-        let sessionJson = null;
-        try {
-          const token = await user.getIdToken(true);
-          localStorage.setItem("idToken", token);
-          // Let server upsert session (server verifies token) and capture response
-          sessionJson = await callServerSession(token);
-        } catch (tErr) {
-          console.warn("Failed to obtain or POST idToken after officer sign-in:", tErr);
-        }
+        // Load existing map of profiles (per-org). If none, start with empty object.
+        const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
 
-        // Persist basic UI profile info (prefer server profile if returned)
-        if (sessionJson && sessionJson.profile && typeof sessionJson.profile === 'object') {
-          if (sessionJson.profile.displayName) localStorage.setItem("studentName", sessionJson.profile.displayName);
-          if (sessionJson.profile.email) localStorage.setItem("studentEmail", sessionJson.profile.email);
-          if (sessionJson.profile.photoURL) localStorage.setItem("studentPhotoURL", sessionJson.profile.photoURL);
-        } else {
-          localStorage.setItem("studentName", user.displayName || "");
-          localStorage.setItem("studentEmail", user.email || "");
-          localStorage.setItem("studentPhotoURL", user.photoURL || "");
-        }
+        // Merge strategy (preserve previously saved fields for this org)
+        const existing = profilesMap[officer.org] || {};
 
-        // Determine organization for this officer: prefer server response, else mapping/inference
-        let org = null;
-        if (sessionJson && sessionJson.org) {
-          org = sessionJson.org;
-        } else {
-          const normalizedEmail = (user.email || "").toLowerCase();
-          org = officerEmailToOrg[normalizedEmail] || inferOrgFromEmail(normalizedEmail);
-        }
+        let mergedName = existing.name || loginProfile.name;
 
-        if (org) {
-          // Build a minimal officer profile object to keep old UX working
-          const usernamePrefix = (user.email || "").split('@')[0] || '';
-          const officerProfile = {
-            username: usernamePrefix,
-            name: (sessionJson && sessionJson.profile && sessionJson.profile.displayName) ? sessionJson.profile.displayName : (user.displayName || org),
-            org: org,
-            photoURL: (sessionJson && sessionJson.profile && sessionJson.profile.photoURL) ? sessionJson.profile.photoURL : (user.photoURL || "")
-          };
-          persistOfficerOrgToLocalStorage(org, officerProfile);
-        } else {
-          // No mapping found — do not block sign-in, but leave org unset.
-          console.warn('No officer->org mapping found for', user.email || email);
-        }
+        const mergedProfile = Object.assign({}, existing, {
+          username: existing.username || loginProfile.username,
+          org: existing.org || loginProfile.org,
+          name: mergedName
+        });
+
+        // Save back into the map (this will preserve other saved fields)
+        profilesMap[officer.org] = mergedProfile;
+        localStorage.setItem("officerProfiles", JSON.stringify(profilesMap));
+
+        // Keep the legacy single-key for compatibility
+        localStorage.setItem("officerProfile", JSON.stringify(mergedProfile));
+
+        // Set current org and logged-in flags
+        localStorage.setItem("officerOrg", officer.org);
+        localStorage.setItem("officerLoggedIn", "true");
+        localStorage.setItem("lastOfficerUsername", officer.username);
 
         // Redirect to officer dashboard
         window.location.href = "officer-dashboard.html";
-        return;
-      } catch (firebaseErr) {
-        console.warn("Firebase officer sign-in failed (falling back to local demo credentials):", firebaseErr);
-        // fallback to legacy local demo accounts for development/testing
-        const officers = [
-          { username: "jiecep_officer", password: "jiecep123", name: "JIECEP Officer", org: "JIECEP" },
-          { username: "aeess_officer", password: "aeess123", name: "AeESS Officer", org: "AeESS" },
-          { username: "aices_officer", password: "aices123", name: "AICES Officer", org: "AICES" },
-          { username: "mexess_officer", password: "mexess123", name: "MEXESS Officer", org: "MEXESS" },
-          { username: "abmes_officer", password: "abmes123", name: "ABMES Officer", org: "ABMES" }
-        ];
-
-        const officer = officers.find(o => o.username === username && o.password === password);
-        if (officer) {
-          // Build the minimal profile we get from login
-          const loginProfile = {
-            username: officer.username,
-            name: officer.name,
-            org: officer.org
-          };
-
-          // Load existing map of profiles (per-org). If none, start with empty object.
-          const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-
-          // Merge strategy (preserve previously saved fields for this org)
-          const existing = profilesMap[officer.org] || {};
-
-          let mergedName = existing.name || loginProfile.name;
-
-          const mergedProfile = Object.assign({}, existing, {
-            username: existing.username || loginProfile.username,
-            org: existing.org || loginProfile.org,
-            name: mergedName
-          });
-
-          // Save back into the map (this will preserve other saved fields)
-          profilesMap[officer.org] = mergedProfile;
-          localStorage.setItem("officerProfiles", JSON.stringify(profilesMap));
-
-          // Keep the legacy single-key for compatibility
-          localStorage.setItem("officerProfile", JSON.stringify(mergedProfile));
-
-          // Set current org and logged-in flags
-          localStorage.setItem("officerOrg", officer.org);
-          localStorage.setItem("officerLoggedIn", "true");
-          localStorage.setItem("lastOfficerUsername", officer.username);
-
-          // Redirect to officer dashboard
-          window.location.href = "officer-dashboard.html";
-        } else {
-          alert("Invalid officer credentials. Please try again.");
-        }
+      } else {
+        alert("Invalid officer credentials. Please try again.");
       }
     });
   }
 });
-
