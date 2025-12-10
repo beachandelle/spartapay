@@ -75,15 +75,21 @@ onAuthStateChanged(auth, async (user) => {
     }
 
     // Basic profile info for UI
+    // store both the legacy student keys and the profilePic key the dashboard reads
     localStorage.setItem("studentName", user.displayName || "");
     localStorage.setItem("studentEmail", user.email || "");
     localStorage.setItem("studentPhotoURL", user.photoURL || "");
+    // Make sure dashboard can read the photo immediately (it checks 'profilePic')
+    if (user.photoURL) {
+      try { localStorage.setItem("profilePic", user.photoURL); } catch (e) { /* ignore */ }
+    }
   } else {
     // Signed out — remove client-side stored pieces
     localStorage.removeItem("idToken");
     localStorage.removeItem("studentName");
     localStorage.removeItem("studentEmail");
     localStorage.removeItem("studentPhotoURL");
+    localStorage.removeItem("profilePic");
     localStorage.removeItem("spartapay_uid");
     localStorage.removeItem("spartapay_role");
   }
@@ -132,6 +138,10 @@ document.addEventListener("DOMContentLoaded", () => {
         localStorage.setItem("studentName", user.displayName || "");
         localStorage.setItem("studentEmail", user.email || "");
         localStorage.setItem("studentPhotoURL", user.photoURL || "");
+        // ensure dashboard sees the picture immediately
+        if (user.photoURL) {
+          try { localStorage.setItem("profilePic", user.photoURL); } catch (e) { /* ignore */ }
+        }
 
         // Call server session to upsert user in Firestore
         if (token) {
@@ -162,7 +172,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // OFFICER LOGIN (Manual)
   const loginBtn = document.getElementById("loginBtn");
   if (loginBtn) {
-    loginBtn.addEventListener("click", () => {
+    loginBtn.addEventListener("click", async () => {
       const username = (document.getElementById("email")?.value || "").trim();
       const password = (document.getElementById("password")?.value || "").trim();
 
@@ -210,6 +220,32 @@ document.addEventListener("DOMContentLoaded", () => {
         localStorage.setItem("officerOrg", officer.org);
         localStorage.setItem("officerLoggedIn", "true");
         localStorage.setItem("lastOfficerUsername", officer.username);
+
+        // Prevent a stale officerOrgId from persisting
+        try {
+          localStorage.removeItem("officerOrgId");
+        } catch (e) {
+          // ignore storage errors
+        }
+
+        // Try to resolve canonical org id from server so dashboard can select the correct orgId when available.
+        // This is non-fatal; if it fails we'll just proceed without setting officerOrgId.
+        try {
+          const res = await fetch(`${SERVER_BASE}/api/orgs`);
+          if (res.ok) {
+            const orgs = await res.json();
+            const found = (orgs || []).find(o => {
+              const name = String(o.name || o.displayName || o.id || '').toLowerCase();
+              return name === String(officer.org).toLowerCase();
+            });
+            if (found && found.id) {
+              try { localStorage.setItem("officerOrgId", found.id); } catch (e) { /* ignore */ }
+            }
+          }
+        } catch (e) {
+          // ignore fetch errors - we already removed stale id
+          console.warn("Failed to resolve orgId for officer login:", e);
+        }
 
         // Redirect to officer dashboard
         window.location.href = "officer-dashboard.html";
