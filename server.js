@@ -1250,6 +1250,8 @@ app.post('/api/payments', verifyFirebaseToken, upload.single('proof'), async (re
     const studentCollege = req.body.studentCollege || req.body.student_college || null;
     const studentDepartment = req.body.studentDepartment || req.body.student_department || null;
     const studentProgram = req.body.studentProgram || req.body.student_program || null;
+    // Accept block variations from client
+    const studentBlock = req.body.studentBlock || req.body.student_block || req.body.block || null;
 
     // If client provided orgId but not org name, attempt to resolve org name for readability
     if (orgIdFromClient && !org) {
@@ -1349,6 +1351,8 @@ app.post('/api/payments', verifyFirebaseToken, upload.single('proof'), async (re
       studentCollege: studentCollege || null,
       studentDepartment: studentDepartment || null,
       studentProgram: studentProgram || null,
+      // persist student block so filters can use it
+      studentBlock: studentBlock || null,
       submittedByUid: req.firebaseUser ? req.firebaseUser.uid : null,
       submittedByEmail: submittedEmail || null
     };
