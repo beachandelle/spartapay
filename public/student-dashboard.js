@@ -853,7 +853,14 @@ document.addEventListener("DOMContentLoaded", () => {
             proof: proofFile ? "(local-file)" : null,
             status: "pending",
             createdAt: new Date().toISOString(),
-            studentName: studentNameVal
+            studentName: studentNameVal,
+            // Persist student profile fields into local fallback so filters can use them (added studentBlock + related fields)
+            studentYear: studentMeta.studentYear || null,
+            studentCollege: studentMeta.studentCollege || null,
+            studentDepartment: studentMeta.studentDepartment || null,
+            studentProgram: studentMeta.studentProgram || null,
+            studentBlock: studentMeta.studentBlock || null,
+            submittedByEmail: localStorage.getItem('studentEmail') || null
           });
           localStorage.setItem('paymentHistory', JSON.stringify(history));
           await loadPaymentHistory();
