@@ -458,33 +458,42 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // NOTE: changed to write-through: attempt server upsert first, then update localStorage.
+  // Instrumented and hardened saveProfile so we can see why network requests may not appear,
+  // and to reliably attach a fresh Firebase idToken when available.
   async function saveProfile() {
+    console.log('saveProfile called');
     // Allow saving even if localStorage.officerOrg isn't set yet:
     const newOrg = getCurrentOrg() || (profileOrg && profileOrg.value ? profileOrg.value.trim() : '');
+    const currentOrgId = getCurrentOrgId();
+    console.log('saveProfile: newOrg=', newOrg, 'currentOrgId=', currentOrgId, 'SERVER_BASE=', SERVER_BASE);
+
     if (!newOrg) {
       alert("Unable to determine organization to save profile for. Please login first.");
+      console.warn('saveProfile aborted: no org determined');
       return;
     }
 
-    // Attempt to refresh the idToken right before doing authenticated requests.
-    // This reduces the chance the server receives an unauthenticated request and only writes local fallback.
+    // Refresh idToken before authenticated requests.
     let freshToken = null;
     try {
       if (window && window._firebaseAuth && window._firebaseAuth.currentUser && typeof window._firebaseAuth.currentUser.getIdToken === 'function') {
         try {
           freshToken = await window._firebaseAuth.currentUser.getIdToken(true);
+          console.log('saveProfile: got fresh idToken via firebase:', !!freshToken);
           if (freshToken) {
             try { localStorage.setItem('idToken', freshToken); } catch (e) { /* ignore */ }
           }
         } catch (tErr) {
           console.warn('Failed to refresh idToken before saving profile:', tErr);
-          // continue; we'll still attempt to use whatever token exists in localStorage
+          // continue: we'll try to use stored token
         }
       } else {
         freshToken = localStorage.getItem('idToken') || null;
+        console.log('saveProfile: no firebase currentUser. stored idToken present=', !!freshToken);
       }
     } catch (e) {
       freshToken = localStorage.getItem('idToken') || null;
+      console.warn('saveProfile: token refresh attempt threw', e);
     }
 
     const profileObj = {
@@ -512,39 +521,43 @@ document.addEventListener("DOMContentLoaded", () => {
         if (lastUser) profileObj.username = lastUser;
       }
     } catch (e) {
-      // ignore parse errors, keep profileObj as-is
+      // ignore parse errors
     }
+
+    console.log('saveProfile: profileObj=', profileObj);
 
     // Attempt server-first upsert. If server operations succeed, mirror authoritative profile.
     try {
       // Ensure organization exists on server first
-      const org = await upsertOrgOnServer(newOrg);
+      console.log('saveProfile: calling upsertOrgOnServer(', newOrg, ')');
+      const orgResp = await upsertOrgOnServer(newOrg);
+      console.log('saveProfile: upsertOrgOnServer returned', orgResp && (orgResp.id || orgResp.name) ? orgResp : 'null/empty');
       let orgId = null;
-      if (org && org.id) {
-        orgId = org.id;
+      if (orgResp && orgResp.id) {
+        orgId = orgResp.id;
       }
 
-      // Build headers explicitly so we are sure Authorization is present
-      const headers = { 'Content-Type': 'application/json' };
-      if (freshToken) headers['Authorization'] = `Bearer ${freshToken}`;
-      else {
-        const stored = localStorage.getItem('idToken') || null;
-        if (stored) headers['Authorization'] = `Bearer ${stored}`;
-      }
-
-      // POST /api/officer-profiles directly, attaching Authorization header explicitly.
+      // Use fetchWithAuth so token is attached if available
       const payload = { org: newOrg, orgId: orgId, profile: profileObj };
-      const res = await fetch(`${SERVER_BASE}/api/officer-profiles`, {
+
+      console.log('saveProfile: about to POST /api/officer-profiles payload=', payload);
+      // If fetchWithAuth is used, it will include Authorization header based on localStorage idToken.
+      const res = await fetchWithAuth(`${SERVER_BASE}/api/officer-profiles`, {
         method: 'POST',
-        headers,
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
-      if (!res.ok) {
-        const txt = await res.text().catch(()=>'');
-        console.error('Failed to save officer profile to server:', res.status, txt);
-        alert(`Failed to save profile to server: ${res.status} ${txt || ''}\nYour changes were saved locally and will be retried, but they will not be visible on other devices until server-side persistence succeeds.`);
-        // Fallback: mirror profile_locally so the user doesn't lose edits for this device.
+      if (!res) {
+        console.error('saveProfile: fetch returned falsy response object');
+      } else {
+        console.log('saveProfile: POST responded', res.status, res.statusText);
+      }
+
+      if (!res || !res.ok) {
+        const txt = res ? await res.text().catch(()=>'') : 'no-response';
+        console.error('Failed to save officer profile to server:', res ? res.status : 'no-res', txt);
+        // Mirror local so user doesn't lose edits
         try {
           const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
           const storeKey = (orgId || newOrg);
@@ -552,12 +565,14 @@ document.addEventListener("DOMContentLoaded", () => {
           localStorage.setItem("officerProfiles", JSON.stringify(pm));
           try { localStorage.setItem('officerProfile', JSON.stringify(pm[storeKey])); } catch (e) {}
         } catch (e) { /* ignore */ }
+        alert(`Failed to save profile to server: ${res ? res.status : 'no response'} ${txt || ''}\nSaved locally for this device.`);
         return;
       }
 
-      // Success: read server response and mirror into localStorage
-      const json = await res.json();
-      const serverProfile = json || {};
+      // Server returned success: mirror server's canonical profile
+      const serverResponse = await res.json().catch(()=>null);
+      console.log('saveProfile: serverResponse=', serverResponse);
+      const serverProfile = serverResponse || {};
       try {
         const key = serverProfile.orgId || serverProfile.org || serverProfile.orgKey || orgId || newOrg;
         const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
@@ -571,6 +586,41 @@ document.addEventListener("DOMContentLoaded", () => {
         if (profilesMap[key].orgId) try { localStorage.setItem('officerOrgId', profilesMap[key].orgId); } catch (e) {}
       } catch (e) {
         console.warn('Failed to mirror server profile to localStorage after successful save:', e);
+      }
+
+      // Try to inform /session about updated profile so users/{uid}.profile is updated
+      try {
+        console.log('saveProfile: about to POST /session to notify user doc of new profile');
+        // Use fetchWithAuth (will attach idToken) and include profile in body
+        const sessRes = await fetchWithAuth(`${SERVER_BASE}/session`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken: getIdToken(), profile: serverProfile })
+        });
+        console.log('saveProfile: /session response', sessRes && sessRes.status);
+        if (sessRes && sessRes.ok) {
+          const sessJson = await sessRes.json().catch(()=>null);
+          console.log('saveProfile: /session returned', sessJson);
+          // mirror session result into officerProfiles map if it included org/profile
+          if (sessJson && sessJson.org) {
+            try {
+              const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
+              const storeKey = sessJson.orgId || sessJson.org || (serverProfile.orgId || serverProfile.org) || newOrg;
+              pm[storeKey] = Object.assign({}, pm[storeKey] || {}, (sessJson.profile && typeof sessJson.profile === 'object') ? sessJson.profile : serverProfile, { org: sessJson.org, orgId: sessJson.orgId || pm[storeKey]?.orgId || storeKey });
+              localStorage.setItem("officerProfiles", JSON.stringify(pm));
+              try { localStorage.setItem('officerOrg', sessJson.org); } catch (e) {}
+              if (sessJson.orgId) try { localStorage.setItem('officerOrgId', sessJson.orgId); } catch (e) {}
+              if (sessJson.profile && sessJson.profile.username) try { localStorage.setItem('lastOfficerUsername', sessJson.profile.username); } catch (e) {}
+            } catch (e) {
+              console.warn('Failed to mirror /session response into localStorage:', e);
+            }
+          }
+        } else {
+          const t = sessRes ? await sessRes.text().catch(()=>'') : 'no-response';
+          console.debug('POST /session returned non-ok after profile upsert:', sessRes ? sessRes.status : 'no-res', t);
+        }
+      } catch (e) {
+        console.warn('POST /session call failed (non-fatal):', e);
       }
 
       // signal other tabs (same browser) to refresh org lists
