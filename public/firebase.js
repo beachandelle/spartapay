@@ -1,4 +1,4 @@
-// firebase.js
+but // firebase.js
 // - Browser ES module for Firebase Auth (no require())
 // - Keeps client idToken and profile in localStorage
 // - Calls POST /session after sign-in to upsert the user on the server
@@ -71,6 +71,15 @@ async function callServerSession(idToken) {
         } catch (e) {
           // ignore
         }
+      } else {
+        // If server returned nothing about org/profile, explicitly remove officerOrg for this newly-signed-in user
+        // so we don't keep a stale org from a previous login.
+        try {
+          // Do not remove the entire officerProfiles map (that's a cache); just clear the active session's officerOrg and single-key profile
+          localStorage.removeItem('officerOrg');
+          localStorage.removeItem('officerProfile');
+          localStorage.removeItem('officerOrgId');
+        } catch (e) { /* ignore */ }
       }
     } catch (e) {
       console.warn('Failed to persist server session org/profile locally:', e);
@@ -87,7 +96,7 @@ async function callServerSession(idToken) {
 function persistOfficerOrgToLocalStorage(orgName, profileInfo = {}) {
   if (!orgName) return;
   try {
-    // Save explicit current org
+    // Save explicit current org (overwrite any stale value)
     localStorage.setItem("officerOrg", orgName);
 
     // Build or merge into officerProfiles map
@@ -118,6 +127,14 @@ onAuthStateChanged(auth, async (user) => {
       const token = await user.getIdToken(true);
       localStorage.setItem("idToken", token);
 
+      // Clear any stale per-session org/profile before we handle the newly-signed-in user.
+      // This prevents a previous officerOrg from sticking around across sign-ins.
+      try {
+        localStorage.removeItem('officerOrg');
+        localStorage.removeItem('officerProfile');
+        localStorage.removeItem('officerOrgId');
+      } catch (e) { /* ignore */ }
+
       // Call server to create/update Firestore user doc and capture server response (authoritative org/profile)
       try {
         const sessionJson = await callServerSession(token);
@@ -145,13 +162,19 @@ onAuthStateChanged(auth, async (user) => {
     localStorage.setItem("studentEmail", user.email || localStorage.getItem("studentEmail") || "");
     localStorage.setItem("studentPhotoURL", user.photoURL || localStorage.getItem("studentPhotoURL") || "");
   } else {
-    // Signed out — remove client-side stored pieces
+    // Signed out — remove client-side stored pieces including per-session officer keys
     localStorage.removeItem("idToken");
     localStorage.removeItem("studentName");
     localStorage.removeItem("studentEmail");
     localStorage.removeItem("studentPhotoURL");
     localStorage.removeItem("spartapay_uid");
     localStorage.removeItem("spartapay_role");
+    // remove per-session officer keys so next login doesn't inherit previous org
+    localStorage.removeItem("officerOrg");
+    localStorage.removeItem("officerProfile");
+    localStorage.removeItem("officerOrgId");
+    localStorage.removeItem("officerLoggedIn");
+    // keep officerProfiles map (cache) intact
   }
 });
 
