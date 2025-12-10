@@ -162,7 +162,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // OFFICER LOGIN (Manual)
   const loginBtn = document.getElementById("loginBtn");
   if (loginBtn) {
-    loginBtn.addEventListener("click", () => {
+    loginBtn.addEventListener("click", async () => {
       const username = (document.getElementById("email")?.value || "").trim();
       const password = (document.getElementById("password")?.value || "").trim();
 
@@ -210,6 +210,32 @@ document.addEventListener("DOMContentLoaded", () => {
         localStorage.setItem("officerOrg", officer.org);
         localStorage.setItem("officerLoggedIn", "true");
         localStorage.setItem("lastOfficerUsername", officer.username);
+
+        // Prevent a stale officerOrgId from persisting
+        try {
+          localStorage.removeItem("officerOrgId");
+        } catch (e) {
+          // ignore storage errors
+        }
+
+        // Try to resolve canonical org id from server so dashboard can select the correct orgId when available.
+        // This is non-fatal; if it fails we'll just proceed without setting officerOrgId.
+        try {
+          const res = await fetch(`${SERVER_BASE}/api/orgs`);
+          if (res.ok) {
+            const orgs = await res.json();
+            const found = (orgs || []).find(o => {
+              const name = String(o.name || o.displayName || o.id || '').toLowerCase();
+              return name === String(officer.org).toLowerCase();
+            });
+            if (found && found.id) {
+              try { localStorage.setItem("officerOrgId", found.id); } catch (e) { /* ignore */ }
+            }
+          }
+        } catch (e) {
+          // ignore fetch errors - we already removed stale id
+          console.warn("Failed to resolve orgId for officer login:", e);
+        }
 
         // Redirect to officer dashboard
         window.location.href = "officer-dashboard.html";
