@@ -1,4 +1,4 @@
-but // firebase.js
+// firebase.js
 // - Browser ES module for Firebase Auth (no require())
 // - Keeps client idToken and profile in localStorage
 // - Calls POST /session after sign-in to upsert the user on the server
@@ -402,3 +402,4 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 });
+
