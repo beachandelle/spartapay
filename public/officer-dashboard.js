@@ -2,13 +2,11 @@
 // - Renders events, payments table, proof modal
 // - Adds three separate stat cards under Payments heading (paid red, approved green, received black)
 // - Keeps Home, Add Event, Edit, Delete, Profile (per-org) functionality and persistence
-// - Prefers server events when available; falls back to localStorage.
+// - Prefers server events/orgs when available; falls back to localStorage.
 // - When saving profile, upserts organization on server and signals other clients via localStorage.orgsLastUpdated
 //
-// Added: server-backed officer profile photo upload support.
-// - New elements: #officerPhotoInput, #uploadOfficerPhotoBtn, #removeOfficerPhotoBtn, #profilePicForm
-// - Save flow will upload multipart/form-data (photo + profile JSON) when a file is selected.
-// - Response profile may include photoURL which is mirrored into local storage and UI.
+// NOTE: This file assumes your HTML contains:
+// - #paymentStats element in the Payments view (we create stats cards inside it if empty)
 
 let editingEventIndex = null;
 let editingServerEventId = null;
@@ -40,12 +38,6 @@ document.addEventListener("DOMContentLoaded", () => {
   const headerTitle = document.getElementById("headerTitle");
   const officerNameSpan = document.getElementById("officerName");
   const profilePic = document.getElementById("profilePic");
-
-  // Profile photo form elements (new)
-  const officerPhotoInput = document.getElementById("officerPhotoInput");
-  const uploadOfficerPhotoBtn = document.getElementById("uploadOfficerPhotoBtn");
-  const removeOfficerPhotoBtn = document.getElementById("removeOfficerPhotoBtn");
-  const profilePicForm = document.getElementById("profilePicForm");
 
   // Home button
   const homeBtn = document.getElementById("homeBtn");
@@ -250,7 +242,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const res = await fetchWithAuth(`${SERVER_BASE}/api/officer-profiles`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ org: orgName, orgId: orgId, profile: profileObj })
+        body: JSON.stringify(payload)
       });
       if (!res.ok) {
         const txt = await res.text().catch(()=>'');
@@ -269,25 +261,26 @@ document.addEventListener("DOMContentLoaded", () => {
     return profilesMap[key] || null;
   }
 
-  // Modified loadProfile to set both header avatar and profile form preview
   async function loadProfile() {
     // Attempt server-first load (if available) to sync across devices, fallback to localStorage as before
     const currentOrg = getCurrentOrg();
     const currentOrgId = getCurrentOrgId();
 
-    // Try server first (non-blocking)
+    // Try server first (always attempt; handle failures gracefully)
     let serverProfile = null;
     try {
       serverProfile = await fetchOfficerProfileFromServer(currentOrg, currentOrgId);
     } catch (e) {
+      console.debug('Server profile fetch failed, falling back to local storage', e);
       serverProfile = null;
     }
 
     if (serverProfile) {
-      // Mirror server profile to localStorage map
+      // Normalize and persist to local mirror for offline use
       try {
         const key = serverProfile.orgId || (serverProfile.org ? serverProfile.org : (serverProfile.orgKey || ''));
         const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
+        // choose canonical key: prefer orgId if present else canonical org name (string)
         const storeKey = key || (serverProfile.org ? serverProfile.org : (serverProfile.orgKey || ''));
         profilesMap[storeKey] = Object.assign({}, profilesMap[storeKey] || {}, serverProfile);
         localStorage.setItem("officerProfiles", JSON.stringify(profilesMap));
@@ -343,15 +336,14 @@ document.addEventListener("DOMContentLoaded", () => {
         if (officerNameSpan) officerNameSpan.textContent = "";
       }
 
-      // attach photo if photoURL present, otherwise leave as default
-      const photoURLToUse = profile.photoURL || profile.photo || profile.photoObjectPath ? null : null;
-      if (profile.photoURL && profilePic) profilePic.src = profile.photoURL;
-      if (profile.photoURL && profilePicForm) profilePicForm.src = profile.photoURL;
+      if (profile.photoURL && profile.org && profile.org === orgName && profilePic) {
+        profilePic.src = profile.photoURL;
+      }
 
       return;
     }
 
-    // Local fallback (unchanged)
+    // else fall back to previous local storage logic
     const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
     let profile = {};
 
@@ -415,33 +407,32 @@ document.addEventListener("DOMContentLoaded", () => {
       if (officerNameSpan) officerNameSpan.textContent = "";
     }
 
-    // Photo handling (local fallback)
-    try {
-      if (profile.photoURL) {
-        if (profilePic) profilePic.src = profile.photoURL;
-        if (profilePicForm) profilePicForm.src = profile.photoURL;
-      } else if (profile.photoObjectPath) {
-        if (profile.photoObjectIsLocal) {
-          const localUrl = `${location.origin}/uploads/${profile.photoObjectPath}`;
-          if (profilePic) profilePic.src = localUrl;
-          if (profilePicForm) profilePicForm.src = localUrl;
-        } else if (supabase) {
-          // we cannot call server-side from client without endpoint; but my earlier fetchOfficerProfileFromServer would have provided photoURL if available
-        }
-      }
-    } catch (e) {
-      // ignore photo load errors
+    if (profile.photoURL && profile.org && profile.org === orgName && profilePic) {
+      profilePic.src = profile.photoURL;
     }
   }
 
-  async function loadProfilePublicFallback() {
-    // Simple wrapper to load profile and set UI; used on init
-    await loadProfile();
+  async function upsertOrgOnServer(orgName) {
+    try {
+      if (!orgName) return null;
+      const res = await fetch(`${SERVER_BASE}/api/orgs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: orgName, displayName: orgName })
+      });
+      if (!res.ok) {
+        const txt = await res.text().catch(()=>'');
+        console.warn('Failed to upsert org on server:', res.status, txt);
+        return null;
+      }
+      const json = await res.json();
+      return json;
+    } catch (err) {
+      console.warn('upsertOrgOnServer error:', err);
+      return null;
+    }
   }
 
-  // ----------------------
-  // Save profile (modified to support photo upload)
-  // ----------------------
   async function saveProfile() {
     // Allow saving even if localStorage.officerOrg isn't set yet:
     const newOrg = getCurrentOrg() || (profileOrg && profileOrg.value ? profileOrg.value.trim() : '');
@@ -462,95 +453,16 @@ document.addEventListener("DOMContentLoaded", () => {
       college: collegeSelect ? collegeSelect.value : "",
       department: departmentSelect ? departmentSelect.value : "",
       program: programSelect ? programSelect.value : "",
-      // photoURL intentionally left out when uploading file; server will return generated signed/photo URL
-      username: (function(){
-        try {
-          const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-          if (profilesMap[newOrg] && profilesMap[newOrg].username) return profilesMap[newOrg].username;
-          const lastUser = localStorage.getItem("lastOfficerUsername") || "";
-          return lastUser || undefined;
-        } catch(e){ return undefined; }
-      })()
+      photoURL: profilePic ? profilePic.src : ""
     };
 
-    // If a file is selected, send multipart/form-data (photo)
-    const file = officerPhotoInput && officerPhotoInput.files && officerPhotoInput.files[0] ? officerPhotoInput.files[0] : null;
-
-    if (file) {
-      // validate basic mime type and size client-side (optional)
-      const allowed = ['image/jpeg','image/png','image/webp'];
-      if (file.size > (10 * 1024 * 1024)) { // 10MB client-side precaution
-        alert('Please choose an image smaller than 10MB.');
-        return;
-      }
-      if (allowed.indexOf(file.type) === -1) {
-        // allow unknown image types but warn
-        const ok = confirm('Selected file is not a common image type. Continue?');
-        if (!ok) return;
-      }
-
-      const form = new FormData();
-      form.append('org', newOrg);
-      const orgId = getCurrentOrgId();
-      if (orgId) form.append('orgId', orgId);
-      // include profile JSON as "profile" field so server receives profile metadata
-      form.append('profile', JSON.stringify(profileObj));
-      form.append('photo', file, file.name);
-
-      // Disable UI while uploading
-      if (uploadOfficerPhotoBtn) uploadOfficerPhotoBtn.disabled = true;
-      if (editSaveProfileBtn) editSaveProfileBtn.disabled = true;
-
-      try {
-        const res = await fetchWithAuth(`${SERVER_BASE}/api/officer-profiles`, {
-          method: 'POST',
-          body: form
-        });
-        if (!res.ok) {
-          const txt = await res.text().catch(()=>'');
-          throw new Error(`Server error ${res.status}: ${txt}`);
-        }
-        const returned = await res.json();
-        // Mirror returned profile to localStorage per-org map
-        try {
-          const key = (returned.orgId && returned.orgId !== '') ? returned.orgId : canonicalKeyForOrg(returned.org || newOrg);
-          const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-          pm[key] = Object.assign({}, pm[key] || {}, returned);
-          localStorage.setItem("officerProfiles", JSON.stringify(pm));
-          try { if (returned.orgId) localStorage.setItem('officerOrgId', returned.orgId); } catch(e){}
-          localStorage.setItem('officerProfile', JSON.stringify(returned)); // single-key fallback
-          if (returned.photoURL) {
-            // Mirror into header and form preview
-            if (profilePic) profilePic.src = returned.photoURL;
-            if (profilePicForm) profilePicForm.src = returned.photoURL;
-          }
-        } catch (e) {
-          console.warn('Failed to mirror returned profile locally:', e);
-        }
-        alert('Profile and photo uploaded successfully!');
-      } catch (e) {
-        console.error('Photo upload/save failed:', e);
-        alert('Failed to upload photo. See console for details.');
-      } finally {
-        if (uploadOfficerPhotoBtn) uploadOfficerPhotoBtn.disabled = false;
-        if (editSaveProfileBtn) editSaveProfileBtn.disabled = false;
-        try { localStorage.setItem('orgsLastUpdated', String(Date.now())); } catch(e){}
-      }
-
-      // After upload, set UI back to read-only
-      setProfileReadOnly(true);
-      if (editSaveProfileBtn) editSaveProfileBtn.textContent = "Edit";
-      if (cancelEditProfileBtn) cancelEditProfileBtn.classList.add("hidden");
-      return;
-    }
-
-    // No file selected - fallback to previous JSON save flow (save profile fields)
     const profilesMap = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
 
     // Try preserve username if present
     if (profilesMap[newOrg] && profilesMap[newOrg].username) {
       profileObj.username = profilesMap[newOrg].username;
     } else {
+      // Keep lastOfficerUsername if present
       const lastUser = localStorage.getItem("lastOfficerUsername") || "";
       if (lastUser) profileObj.username = lastUser;
     }
@@ -558,112 +470,94 @@ document.addEventListener("DOMContentLoaded", () => {
     // Save per-org map and also write single-key fallback (only for convenience)
     profilesMap[newOrg] = Object.assign({}, profilesMap[newOrg] || {}, profileObj);
     localStorage.setItem("officerProfiles", JSON.stringify(profilesMap));
-    try { localStorage.setItem('officerOrg', newOrg); } catch (e) {}
-    localStorage.setItem("officerProfile", JSON.stringify(profileObj));
+    try { localStorage.setItem("officerOrg", newOrg); } catch (e) {}
+    localStorage.setItem("officerProfile", JSON.stringify(profileObj)); // single-key fallback
 
-    // Update header UI
+    // Persist lastOfficerUsername if username present
+    if (profileObj.username) localStorage.setItem("lastOfficerUsername", profileObj.username);
+
     if (headerTitle) headerTitle.textContent = `Hello ${profileObj.org}`;
     if (officerNameSpan) officerNameSpan.textContent = profileObj.org;
 
-    // Non-blocking attempt to ensure organization exists on server and to persist profile
+    // Non-blocking attempt to ensure organization exists on server.
     (async () => {
       try {
-        // upsert org helper (server side) - reuse existing upsertOrganizationByName via /api/orgs
-        try {
-          const orgResp = await fetchWithAuth(`${SERVER_BASE}/api/orgs`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: newOrg, displayName: newOrg })
-          });
-          if (orgResp.ok) {
-            const orgJson = await orgResp.json();
-            if (orgJson && orgJson.id) {
-              try { localStorage.setItem('officerOrgId', orgJson.id); } catch (e) {}
-            }
-          }
-        } catch (e) {
-          // ignore org upsert errors
+        const org = await upsertOrgOnServer(newOrg);
+        if (org && org.id) {
+          // store org id in profiles map for convenience
+          const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
+          pm[newOrg] = pm[newOrg] || {};
+          pm[newOrg].orgId = org.id;
+          localStorage.setItem("officerProfiles", JSON.stringify(pm));
+          try { localStorage.setItem('officerOrgId', org.id); } catch(e) {}
         }
 
-        // Upsert officer profile via JSON (no photo)
-        const orgIdToSend = localStorage.getItem('officerOrgId') || null;
-        const resp = await fetchWithAuth(`${SERVER_BASE}/api/officer-profiles`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ org: newOrg, orgId: orgIdToSend, profile: profileObj })
-        });
-        if (!resp.ok) {
-          const txt = await resp.text().catch(()=>'');
-          console.warn('/api/officer-profiles JSON persist failed:', resp.status, txt);
-        } else {
-          const returned = await resp.json();
-          // Mirror server authoritative profile
+        // Now upsert the full profile to the server so other devices can read it
+        const orgIdToSend = (org && org.id) ? org.id : (profileObj.orgId || getCurrentOrgId() || null);
+        const serverResult = await upsertOfficerProfileToServer(newOrg, orgIdToSend, profileObj);
+        if (serverResult) {
+          // Mirror the authoritative server profile into localStorage map
           try {
-            const key = (returned.orgId && returned.orgId !== '') ? returned.orgId : canonicalKeyForOrg(returned.org || newOrg);
+            const key = serverResult.orgId || serverResult.org || serverResult.orgKey || newOrg;
             const pm2 = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-            pm2[key] = Object.assign({}, pm2[key] || {}, returned);
+            pm2[key] = Object.assign({}, pm2[key] || {}, serverResult);
             localStorage.setItem("officerProfiles", JSON.stringify(pm2));
-            if (returned.orgId) try { localStorage.setItem('officerOrgId', returned.orgId); } catch(e){}
+            if (serverResult.orgId) {
+              try { localStorage.setItem('officerOrgId', serverResult.orgId); } catch(e) {}
+            }
           } catch (e) {
-            console.warn('Failed to mirror server profile after JSON upsert:', e);
+            console.warn('Failed to mirror server profile after upsert:', e);
           }
         }
+
+        // signal other tabs (same browser) to refresh org lists
+        try {
+          localStorage.setItem('orgsLastUpdated', String(Date.now()));
+        } catch (e) { /* ignore */ }
       } catch (e) {
         console.warn('Failed to upsert org or profile after saving profile:', e);
-      } finally {
-        try { localStorage.setItem('orgsLastUpdated', String(Date.now())); } catch(e){}
       }
     })();
-
-    alert('Profile saved successfully!');
-    showEvents();
   }
 
-  // Remove officer photo (client triggers server-side update to remove stored photoObjectPath)
-  async function removeOfficerPhoto() {
-    const currentOrg = getCurrentOrg() || '';
-    const currentOrgId = getCurrentOrgId() || '';
-    if (!currentOrg && !currentOrgId) {
-      alert('No organization context available.');
-      return;
+  function setProfileReadOnly(isReadOnly) {
+    const fields = [surnameInput, givenNameInput, middleInitialInput, designationInput];
+    fields.forEach(f => { if (f) { f.readOnly = isReadOnly; f.style.backgroundColor = isReadOnly ? "#f0f0f0" : "#fff"; }});
+    if (yearSelect) yearSelect.disabled = isReadOnly;
+    if (collegeSelect) collegeSelect.disabled = isReadOnly;
+    if (departmentSelect) departmentSelect.disabled = isReadOnly;
+    if (programSelect) programSelect.disabled = isReadOnly;
+    const selectFields = [yearSelect, collegeSelect, departmentSelect, programSelect];
+    selectFields.forEach(f => { if (f) f.style.backgroundColor = isReadOnly ? "#e0e0e0" : "#fff"; });
+    if (cancelEditProfileBtn) {
+      if (isReadOnly) cancelEditProfileBtn.classList.add("hidden");
+      else cancelEditProfileBtn.classList.remove("hidden");
     }
-    if (!confirm('Remove saved profile photo? This will clear the stored photo for this organization.')) return;
+  }
 
-    // Build minimal profile object to clear photo fields
-    const minimal = { photoObjectPath: null, photoObjectIsLocal: false };
-    try {
-      const formBody = { org: currentOrg, orgId: currentOrgId, profile: minimal };
-      const res = await fetchWithAuth(`${SERVER_BASE}/api/officer-profiles`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formBody)
-      });
-      if (res.ok) {
-        const returned = await res.json();
-        // Mirror removal to localStorage map
-        try {
-          const key = (returned.orgId && returned.orgId !== '') ? returned.orgId : canonicalKeyForOrg(returned.org || currentOrg);
-          const pm = JSON.parse(localStorage.getItem("officerProfiles") || "{}");
-          pm[key] = Object.assign({}, pm[key] || {}, returned);
-          // Clear photoURL if present
-          if (pm[key] && pm[key].photoURL) delete pm[key].photoURL;
-          if (pm[key] && pm[key].photoObjectPath) delete pm[key].photoObjectPath;
-          localStorage.setItem("officerProfiles", JSON.stringify(pm));
-        } catch (e) {
-          console.warn('Failed to mirror removal locally:', e);
-        }
-        // Update UI
-        if (profilePic) profilePic.src = 'jiecep.png';
-        if (profilePicForm) profilePicForm.src = 'jiecep.png';
-        alert('Profile photo removed.');
+  // Wire Edit/Save profile button
+  if (editSaveProfileBtn) {
+    editSaveProfileBtn.addEventListener("click", () => {
+      if (editSaveProfileBtn.textContent === "Edit") {
+        setProfileReadOnly(false);
+        editSaveProfileBtn.textContent = "Save";
+        if (cancelEditProfileBtn) cancelEditProfileBtn.classList.remove("hidden");
       } else {
-        const txt = await res.text().catch(()=>'');
-        alert('Failed to remove profile photo: ' + txt);
+        // Save profile to per-org storage and upsert org on server
+        saveProfile();
+        setProfileReadOnly(true);
+        editSaveProfileBtn.textContent = "Edit";
+        alert("Profile saved successfully!");
       }
-    } catch (e) {
-      console.error('removeOfficerPhoto error:', e);
-      alert('Failed to remove photo. See console.');
-    }
+    });
+  }
+
+  if (cancelEditProfileBtn) {
+    cancelEditProfileBtn.addEventListener("click", () => {
+      loadProfile();
+      setProfileReadOnly(true);
+      editSaveProfileBtn.textContent = "Edit";
+    });
   }
 
   // ----------------------
@@ -1908,7 +1802,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // initialize
   ensureProfileButtonWorks();
-  loadProfilePublicFallback();
+  loadProfile();
   loadEvents();
   showEvents();
 
@@ -2216,35 +2110,5 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // ----------------------
-  // Wire upload + remove photo buttons and file preview behaviour
-  // ----------------------
-  if (officerPhotoInput) {
-    officerPhotoInput.addEventListener("change", (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (!f) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (profilePicForm) profilePicForm.src = reader.result;
-      };
-      reader.readAsDataURL(f);
-    });
-  }
-
-  if (uploadOfficerPhotoBtn) {
-    uploadOfficerPhotoBtn.addEventListener("click", async (e) => {
-      // Delegate to saveProfile which handles file upload if officerPhotoInput has a file
-      await saveProfile();
-    });
-  }
-
-  if (removeOfficerPhotoBtn) {
-    removeOfficerPhotoBtn.addEventListener("click", async () => {
-      await removeOfficerPhoto();
-    });
-  }
-
-  // ----------------------
   // End DOMContentLoaded
-  // ----------------------
 });
