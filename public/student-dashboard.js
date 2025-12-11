@@ -817,7 +817,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (els.payNowBtn) els.payNowBtn.addEventListener('click', () => {
     // Require profile (Year + Block) before allowing payment (Option A)
     if (!isProfileSavedAndComplete()) {
-      const ok = confirm('Please save your profile (Year and Block) before paying. Open profile editor now?');
+      const ok = confirm('Please save your profile before paying. Open profile editor now?');
       if (ok) {
         showProfileEditor();
       }
@@ -1006,3 +1006,4 @@ document.addEventListener("DOMContentLoaded", () => {
   // ----------------------
   showHome();
 });
+
