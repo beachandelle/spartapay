@@ -1,7 +1,7 @@
 /* officer-dashboard.css - full stylesheet including stats layout & colors
    Adjusted so the main events table header matches the red/white style of the
    payments (verify) table header, and the organization name in the greeting is red.
-   Added self-hosted Garet font usage (font-face + variable).
+   Added self-hosted Garet font usage (font-face + variable) and brand text styling.
 */
 
 /* Self-hosted Garet font faces */
@@ -71,6 +71,25 @@ header {
   display:flex;
   align-items:center;
   gap:20px;
+}
+
+/* Brand text (SPARTAPAY) next to the logo */
+.brand-text {
+  font-family: var(--ui-font);
+  font-weight: 800;
+  font-size: 18px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  text-decoration: none;
+  margin-left: 4px;
+  display: inline-block;
+}
+.brand-text:hover { opacity: 0.9; }
+
+/* Hide brand text on very small screens to preserve space */
+@media (max-width:480px) {
+  .brand-text { display: none; }
 }
 
 #bsuLogo { height:36px; width:auto; object-fit:contain; }
