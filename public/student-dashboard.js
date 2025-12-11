@@ -848,7 +848,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   if (els.proceedPaymentBtn) {
-    els.proceedPaymentBtn.addEventListener('click', () => {
+    // make the handler async because we may request a fresh signed QR URL from the server
+    els.proceedPaymentBtn.addEventListener('click', async () => {
       // Guard: require profile saved before proceeding to payment panel
       if (!isProfileSavedAndComplete()) {
         const ok = confirm('Please save your profile (Year and Block) before proceeding to payment. Open profile editor now?');
@@ -858,9 +859,39 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const eventOption = (els.eventSelect && els.eventSelect.selectedOptions && els.eventSelect.selectedOptions[0]) || null;
       if (!eventOption || !eventOption.value) { alert('Please select an event before proceeding.'); return; }
-      const qrCode = eventOption.dataset.qr || '';
+      let qrCode = eventOption.dataset.qr || '';
       const receiver = eventOption.dataset.receiver || '';
       const amount = eventOption.dataset.fee || '';
+
+      // If no qr present in dataset (likely private storage), request fresh signed URL from server endpoint
+      if ((!qrCode || qrCode === '') && eventOption.value) {
+        // show temporary loading UI
+        if (els.qrContainer) els.qrContainer.innerHTML = "<p>Loading QR...</p>";
+        try {
+          const eventId = eventOption.value;
+          // Use fetchWithAuth to include idToken if available (endpoint is public but token is harmless)
+          const resp = await fetchWithAuth(`${SERVER_BASE}/api/events/${encodeURIComponent(eventId)}/qr-url`);
+          if (resp.ok) {
+            const payload = await resp.json();
+            if (payload && payload.url) {
+              qrCode = payload.url;
+            } else {
+              qrCode = '';
+            }
+          } else {
+            // non-OK response: treat as no QR
+            qrCode = '';
+            // optionally read text for debug, but do not surface to user
+            // const txt = await resp.text().catch(()=>'');
+            // console.debug('qr-url response:', resp.status, txt);
+          }
+        } catch (err) {
+          console.warn('Failed to fetch QR from server:', err);
+          qrCode = '';
+        }
+      }
+
+      // Render QR or fallback message
       if (els.qrContainer) els.qrContainer.innerHTML = qrCode ? `<img src="${escapeHtml(qrCode)}" alt="QR Code" style="width:150px;">` : "<p>No QR available</p>";
       if (els.receiverInfo) els.receiverInfo.textContent = `Receiver Name: ${receiver || "N/A"}`;
       if (els.amountInfo) els.amountInfo.textContent = `Amount: ₱${amount}`;
@@ -1006,4 +1037,3 @@ document.addEventListener("DOMContentLoaded", () => {
   // ----------------------
   showHome();
 });
-
