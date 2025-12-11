@@ -275,6 +275,48 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // ----------------------
+  // Helper: check whether profile is saved and contains required fields (Year + Block)
+  // ----------------------
+  function isProfileSavedAndComplete() {
+    try {
+      const profile = JSON.parse(localStorage.getItem('studentProfile') || '{}');
+      const year = (profile && profile.year) ? String(profile.year).trim() : '';
+      const block = (profile && profile.block) ? String(profile.block).trim() : '';
+      // Also check visible form fields as a fallback
+      const yearInput = els.studentYear ? (els.studentYear.value || '').trim() : '';
+      const blockInput = els.studentBlock ? (els.studentBlock.value || '').trim() : '';
+      const y = year || yearInput;
+      const b = block || blockInput;
+      return !!(y && b);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Helper to show profile editor and enable editing
+  function showProfileEditor() {
+    try {
+      loadProfile();
+      if (els.profileForm) els.profileForm.classList.remove('hidden');
+      if (els.paymentHistorySection) els.paymentHistorySection.classList.add('hidden');
+      if (els.payNowBtn) els.payNowBtn.style.display = 'none';
+      // Trigger edit mode if Edit button exists
+      if (els.editSaveProfileBtn) {
+        // If it says "Edit", clicking will turn it to "Save" and enable fields
+        if (els.editSaveProfileBtn.textContent === 'Edit') {
+          try { els.editSaveProfileBtn.click(); } catch (e) { /* ignore */ }
+        } else {
+          // already in Save mode - leave it
+        }
+      }
+      try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch(e) {}
+    } catch (e) {
+      console.warn('showProfileEditor failed:', e);
+      alert('Please open your profile and make sure Year and Block are set before paying.');
+    }
+  }
+
+  // ----------------------
   // Render payment history
   // ----------------------
   function renderPaymentHistoryFromArray(arr) {
@@ -707,7 +749,7 @@ document.addEventListener("DOMContentLoaded", () => {
         els.editSaveProfileBtn.textContent = 'Save';
         if (els.profileForm) els.profileForm.classList.remove('hidden');
         if (els.paymentHistorySection) els.paymentHistorySection.classList.add('hidden');
-        if (els.payNowBtn) els.payNowBtn.style.display='none';
+        if (els.payNowBtn) els.payNowBtn.style.display = 'none';
         if (els.cancelProfileBtn) els.cancelProfileBtn.classList.remove('hidden');
       } else {
         const prevProfile = JSON.parse(localStorage.getItem('studentProfile')||'{}');
@@ -772,10 +814,27 @@ document.addEventListener("DOMContentLoaded", () => {
   // ----------------------
   // Pay Now flow wiring
   // ----------------------
-  if (els.payNowBtn) els.payNowBtn.addEventListener('click', () => { showPaymentFlow(); });
+  if (els.payNowBtn) els.payNowBtn.addEventListener('click', () => {
+    // Require profile (Year + Block) before allowing payment (Option A)
+    if (!isProfileSavedAndComplete()) {
+      const ok = confirm('Please save your profile (Year and Block) before paying. Open profile editor now?');
+      if (ok) {
+        showProfileEditor();
+      }
+      return;
+    }
+    showPaymentFlow();
+  });
 
   if (els.confirmDetailsBtn) {
     els.confirmDetailsBtn.addEventListener('click', () => {
+      // Guard: require profile saved before proceeding
+      if (!isProfileSavedAndComplete()) {
+        const ok = confirm('Please save your profile (Year and Block) before proceeding. Open profile editor now?');
+        if (ok) showProfileEditor();
+        return;
+      }
+
       const orgId = els.orgSelect ? els.orgSelect.value : '';
       const eventOption = (els.eventSelect && els.eventSelect.selectedOptions && els.eventSelect.selectedOptions[0]) || null;
       if (!orgId || !eventOption || !eventOption.value) { alert('Please select both organization and event.'); return; }
@@ -790,6 +849,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
   if (els.proceedPaymentBtn) {
     els.proceedPaymentBtn.addEventListener('click', () => {
+      // Guard: require profile saved before proceeding to payment panel
+      if (!isProfileSavedAndComplete()) {
+        const ok = confirm('Please save your profile (Year and Block) before proceeding to payment. Open profile editor now?');
+        if (ok) showProfileEditor();
+        return;
+      }
+
       const eventOption = (els.eventSelect && els.eventSelect.selectedOptions && els.eventSelect.selectedOptions[0]) || null;
       if (!eventOption || !eventOption.value) { alert('Please select an event before proceeding.'); return; }
       const qrCode = eventOption.dataset.qr || '';
@@ -854,6 +920,16 @@ document.addEventListener("DOMContentLoaded", () => {
         studentProgram: (els.studentProgram && els.studentProgram.value) ? els.studentProgram.value : (studentProfile.program || ''),
         studentBlock: (els.studentBlock && els.studentBlock.value) ? els.studentBlock.value : (studentProfile.block || '') // NEW: include block in payment metadata
       };
+
+      // Final guard: ensure Year and Block are present before allowing submission (defense-in-depth)
+      if (!studentMeta.studentYear || !studentMeta.studentBlock) {
+        alert('Your profile is missing Year and/or Block. Please save your profile before submitting payment.');
+        if (submitBtn) submitBtn.disabled = false;
+        _isSubmittingPayment = false;
+        // open profile editor
+        showProfileEditor();
+        return;
+      }
 
       (async () => {
         try {
