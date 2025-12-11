@@ -1452,6 +1452,29 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch (e) { return String(s || '').toLowerCase(); }
   }
 
+  // Helper to create a pretty display label for year tokens (display-only)
+  function prettyYearLabel(token) {
+    try {
+      const t = String(token || '').trim();
+      // numeric token like "4" -> "4th Year"
+      const digits = t.match(/^(\d+)$/);
+      if (digits) {
+        const n = Number(digits[1]);
+        const suffix = (n % 10 === 1 && n % 100 !== 11) ? 'st' : (n % 10 === 2 && n % 100 !== 12) ? 'nd' : (n % 10 === 3 && n % 100 !== 13) ? 'rd' : 'th';
+        return `${n}${suffix} Year`;
+      }
+      // token already like "4th" or "4th Year"
+      const matchOrd = t.match(/^(\d+)(st|nd|rd|th)(?:\s*year)?$/i);
+      if (matchOrd) {
+        return `${matchOrd[1]}${matchOrd[2]} Year`;
+      }
+      // otherwise return token as-is (fallback)
+      return t;
+    } catch (e) {
+      return String(token || '');
+    }
+  }
+
   // Populate drawer with chips for years and blocks
   async function openFilterDrawer() {
     if (!currentEventView) {
@@ -1493,11 +1516,8 @@ document.addEventListener("DOMContentLoaded", () => {
       } catch (e2) { availableFilters = { years: [], blocks: [] }; }
     }
 
-    // Build UI: Year chips (fixed) and Block chips (derived) with search
+    // Build UI: Year chips (derived from availableFilters when possible) and Block chips (derived) with search
     container.innerHTML = "";
-
-    // Fixed years (always show these chips)
-    const FIXED_YEARS = ["1st Year", "2nd Year", "3rd Year", "4th Year"];
 
     // Year section
     const yearSection = document.createElement("div");
@@ -1505,30 +1525,74 @@ document.addEventListener("DOMContentLoaded", () => {
     const yLabel = document.createElement("div"); yLabel.textContent = "Year"; yLabel.style.fontWeight = "600"; yLabel.style.marginBottom = "8px"; yearSection.appendChild(yLabel);
     const yWrap = document.createElement("div"); yWrap.style.display = "flex"; yWrap.style.flexWrap = "wrap"; yWrap.style.gap = "8px";
 
-    FIXED_YEARS.forEach(y => {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "filter-chip";
-      chip.textContent = String(y);
-      chip.dataset.value = String(y);
-      chip.style.border = "1px solid #ddd";
-      chip.style.padding = "8px 10px";
-      chip.style.borderRadius = "6px";
-      chip.style.background = activeFilters.years.includes(String(y)) ? "#222" : "#f7f7f7";
-      chip.style.color = activeFilters.years.includes(String(y)) ? "#fff" : "#111";
-      chip.addEventListener("click", () => {
-        const val = String(y);
-        const idx = activeFilters.years.findIndex(v => normalizeForMatch(v) === normalizeForMatch(val));
-        if (idx === -1) {
-          activeFilters.years.push(val);
-          chip.style.background = "#222"; chip.style.color = "#fff";
-        } else {
-          activeFilters.years.splice(idx, 1);
-          chip.style.background = "#f7f7f7"; chip.style.color = "#111";
-        }
+    const years = Array.isArray(availableFilters.years) ? availableFilters.years : [];
+
+    if (years.length === 0) {
+      // Fallback to fixed years (keeps backwards compatibility). These will use the labels as tokens.
+      const FIXED_YEARS = ["1st Year", "2nd Year", "3rd Year", "4th Year"];
+      FIXED_YEARS.forEach(y => {
+        const raw = String(y);
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "filter-chip";
+        chip.textContent = String(y);
+        chip.dataset.value = raw;
+        chip.style.border = "1px solid #ddd";
+        chip.style.padding = "8px 10px";
+        chip.style.borderRadius = "6px";
+        chip.style.background = activeFilters.years.findIndex(v => normalizeForMatch(v) === normalizeForMatch(raw)) !== -1 ? "#222" : "#f7f7f7";
+        chip.style.color = activeFilters.years.findIndex(v => normalizeForMatch(v) === normalizeForMatch(raw)) !== -1 ? "#fff" : "#111";
+        chip.addEventListener("click", () => {
+          const val = raw;
+          const idx = activeFilters.years.findIndex(v => normalizeForMatch(v) === normalizeForMatch(val));
+          if (idx === -1) {
+            activeFilters.years.push(val);
+            chip.style.background = "#222"; chip.style.color = "#fff";
+          } else {
+            activeFilters.years.splice(idx, 1);
+            chip.style.background = "#f7f7f7"; chip.style.color = "#111";
+          }
+        });
+        yWrap.appendChild(chip);
       });
-      yWrap.appendChild(chip);
-    });
+    } else {
+      // Build chips from availableFilters.years (use raw token as dataset.value; display pretty label)
+      // Deduplicate by normalized token
+      const seen = new Set();
+      years.forEach(rawToken => {
+        const raw = String(rawToken || '').trim();
+        if (!raw) return;
+        const key = normalizeForMatch(raw);
+        if (seen.has(key)) return;
+        seen.add(key);
+
+        const display = prettyYearLabel(raw);
+
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "filter-chip";
+        chip.textContent = display || raw;
+        chip.dataset.value = raw; // IMPORTANT: underlying token used for filtering
+        chip.style.border = "1px solid #ddd";
+        chip.style.padding = "8px 10px";
+        chip.style.borderRadius = "6px";
+        chip.style.background = activeFilters.years.findIndex(v => normalizeForMatch(v) === normalizeForMatch(raw)) !== -1 ? "#222" : "#f7f7f7";
+        chip.style.color = activeFilters.years.findIndex(v => normalizeForMatch(v) === normalizeForMatch(raw)) !== -1 ? "#fff" : "#111";
+        chip.addEventListener("click", () => {
+          const val = raw;
+          const idx = activeFilters.years.findIndex(v => normalizeForMatch(v) === normalizeForMatch(val));
+          if (idx === -1) {
+            activeFilters.years.push(val);
+            chip.style.background = "#222"; chip.style.color = "#fff";
+          } else {
+            activeFilters.years.splice(idx, 1);
+            chip.style.background = "#f7f7f7"; chip.style.color = "#111";
+          }
+        });
+        yWrap.appendChild(chip);
+      });
+    }
+
     yearSection.appendChild(yWrap);
     container.appendChild(yearSection);
 
@@ -1553,13 +1617,13 @@ document.addEventListener("DOMContentLoaded", () => {
       const none = document.createElement("div"); none.textContent = "No block data available"; none.style.color = "#666"; blockSection.appendChild(none);
     } else {
       // dedupe & normalize display order
-      const seen = new Set();
+      const seenB = new Set();
       blocks.forEach(raw => {
         const b = String(raw || '').trim();
         if (!b) return;
         const key = normalizeForMatch(b);
-        if (seen.has(key)) return;
-        seen.add(key);
+        if (seenB.has(key)) return;
+        seenB.add(key);
 
         const chip = document.createElement("button");
         chip.type = "button";
