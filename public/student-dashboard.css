@@ -1,6 +1,6 @@
 /* student-dashboard.css
    Updated to match officer UI styling: shared accent, card UI, table header gradient, button styles.
-   Added self-hosted Garet font usage and variables.
+   Added self-hosted Garet font usage and brand text styling.
 */
 
 /* Self-hosted Garet font faces */
@@ -68,6 +68,25 @@ header {
 
 .header-left { display:flex; align-items:center; gap:20px; }
 #bsuLogo { height:36px; width:auto; object-fit:contain; }
+
+/* Brand text (SPARTAPAY) next to the logo */
+.brand-text {
+  font-family: var(--ui-font);
+  font-weight: 800;
+  font-size: 18px;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  text-decoration: none;
+  margin-left: 4px;
+  display: inline-block;
+}
+.brand-text:hover { opacity: 0.9; }
+
+/* Hide brand text on very small screens to preserve space */
+@media (max-width:480px) {
+  .brand-text { display: none; }
+}
 
 /* Nav link ghost */
 .btn-ghost {
