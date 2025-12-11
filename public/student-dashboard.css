@@ -69,19 +69,20 @@ header {
 .header-left { display:flex; align-items:center; gap:20px; }
 #bsuLogo { height:36px; width:auto; object-fit:contain; }
 
-/* Brand text (SPARTAPAY) next to the logo */
+/* Brand text (SPARTAPAY) next to the logo - plain black, non-clickable */
 .brand-text {
   font-family: var(--ui-font);
-  font-weight: 800;
+  font-weight: 700;
   font-size: 18px;
-  color: var(--accent);
+  color: #000;               /* plain black as requested */
   text-transform: uppercase;
   letter-spacing: 1px;
   text-decoration: none;
   margin-left: 4px;
   display: inline-block;
+  pointer-events: none;      /* ensure it's not interactive */
+  user-select: none;
 }
-.brand-text:hover { opacity: 0.9; }
 
 /* Hide brand text on very small screens to preserve space */
 @media (max-width:480px) {
@@ -212,3 +213,5 @@ h3 { color: var(--accent); font-family: var(--ui-font); }
 }
 
 /* Filter / drawer and modal styles are not changed here for student; officer modal styles used elsewhere. */
+
+/* End of student stylesheet */
