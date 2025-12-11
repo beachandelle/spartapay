@@ -73,19 +73,20 @@ header {
   gap:20px;
 }
 
-/* Brand text (SPARTAPAY) next to the logo */
+/* Brand text (SPARTAPAY) next to the logo - plain black, non-clickable */
 .brand-text {
   font-family: var(--ui-font);
-  font-weight: 800;
+  font-weight: 700;
   font-size: 18px;
-  color: var(--accent);
+  color: #000;               /* plain black as requested */
   text-transform: uppercase;
   letter-spacing: 1px;
   text-decoration: none;
   margin-left: 4px;
   display: inline-block;
+  pointer-events: none;      /* ensure it's not interactive */
+  user-select: none;
 }
-.brand-text:hover { opacity: 0.9; }
 
 /* Hide brand text on very small screens to preserve space */
 @media (max-width:480px) {
@@ -269,6 +270,10 @@ header {
 
 /* Filter placeholder button */
 #filterBtn { min-width: 84px; }
+
+#filterBtn[aria-pressed="true"] {
+  box-shadow: inset 0 0 0 2px rgba(0,0,0,0.06);
+}
 
 /* Status select */
 .status-select { padding:8px 10px; border-radius:8px; border:1px solid #ddd; background:#fff; font-weight:600; color:#222; font-family: var(--ui-font); }
