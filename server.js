@@ -175,6 +175,28 @@ async function makeFileUrl(pathOnBucket, { expires = 60 * 60 } = {}) {
   }
 }
 
+// Helper: attach a usable photoURL to a profile response (does not mutate storage)
+// returns a shallow-cloned profile with photoURL when available
+async function attachProfilePhotoUrl(profile, req) {
+  if (!profile || typeof profile !== 'object') return profile;
+  const copy = Object.assign({}, profile);
+  try {
+    if (copy.photoObjectPath) {
+      if (copy.photoObjectIsLocal) {
+        copy.photoURL = `${req.protocol}://${req.get('host')}/uploads/${copy.photoObjectPath}`;
+      } else if (supabase) {
+        const url = await makeFileUrl(copy.photoObjectPath);
+        if (url) copy.photoURL = url;
+      } else {
+        // If no supabase and not local, leave photoURL undefined
+      }
+    }
+  } catch (e) {
+    console.warn('attachProfilePhotoUrl error:', e);
+  }
+  return copy;
+}
+
 // Helper: canonicalize org name for comparisons
 function canonicalOrgName(name) {
   try {
@@ -600,31 +622,42 @@ app.get('/api/officer-profiles', async (req, res) => {
       // if filtering, try to read specific doc
       if (orgIdQuery) {
         const doc = await getOfficerProfileFromFirestoreByKey(orgIdQuery);
-        return res.json(doc ? [doc] : []);
+        if (!doc) return res.json([]);
+        const withPhoto = await attachProfilePhotoUrl(doc, req);
+        return res.json([withPhoto]);
       }
       if (orgQuery) {
         const key = canonicalKeyForOrg(orgQuery);
         const doc = await getOfficerProfileFromFirestoreByKey(key);
-        return res.json(doc ? [doc] : []);
+        if (!doc) return res.json([]);
+        const withPhoto = await attachProfilePhotoUrl(doc, req);
+        return res.json([withPhoto]);
       }
       const list = await listOfficerProfilesFromFirestore();
-      return res.json(list);
+      // attach photo URLs where possible
+      const enriched = await Promise.all((list || []).map(p => attachProfilePhotoUrl(p, req)));
+      return res.json(enriched);
     }
 
     // fallback: read from local data.json
     const map = await readOfficerProfilesFromDB();
     if (orgIdQuery) {
       const p = map[orgIdQuery] || null;
-      return res.json(p ? [p] : []);
+      if (!p) return res.json([]);
+      const withPhoto = await attachProfilePhotoUrl(p, req);
+      return res.json([withPhoto]);
     }
     if (orgQuery) {
       const key = canonicalKeyForOrg(orgQuery);
       const p = map[key] || null;
-      return res.json(p ? [p] : []);
+      if (!p) return res.json([]);
+      const withPhoto = await attachProfilePhotoUrl(p, req);
+      return res.json([withPhoto]);
     }
     // return all values
     const vals = Object.keys(map).map(k => map[k]);
-    return res.json(vals);
+    const enrichedVals = await Promise.all(vals.map(v => attachProfilePhotoUrl(v, req)));
+    return res.json(enrichedVals);
   } catch (err) {
     console.error('GET /api/officer-profiles error:', err);
     return res.status(500).json({ error: 'Server error' });
@@ -638,12 +671,14 @@ app.get('/api/officer-profiles/:id', async (req, res) => {
     if (firestore) {
       const doc = await getOfficerProfileFromFirestoreByKey(id);
       if (!doc) return res.status(404).json({ error: 'not found' });
-      return res.json(doc);
+      const withPhoto = await attachProfilePhotoUrl(doc, req);
+      return res.json(withPhoto);
     }
     const map = await readOfficerProfilesFromDB();
     const profile = map[id] || map[canonicalKeyForOrg(id)] || null;
     if (!profile) return res.status(404).json({ error: 'not found' });
-    return res.json(profile);
+    const withPhoto = await attachProfilePhotoUrl(profile, req);
+    return res.json(withPhoto);
   } catch (err) {
     console.error('GET /api/officer-profiles/:id error:', err);
     return res.status(500).json({ error: 'Server error' });
@@ -653,28 +688,94 @@ app.get('/api/officer-profiles/:id', async (req, res) => {
 // POST /api/officer-profiles - upsert profile
 // Body: { org, orgId (optional), profile: { name: {surname,given,middle}, designation, year, college, department, program, photoURL, username } }
 // Requires authentication when Firebase admin is configured (verifyFirebaseToken). When admin not configured, endpoint still works (no auth).
-app.post('/api/officer-profiles', verifyFirebaseToken, async (req, res) => {
+// This endpoint now accepts multipart/form-data with optional "photo" file.
+app.post('/api/officer-profiles', verifyFirebaseToken, upload.single('photo'), async (req, res) => {
   try {
-    const body = req.body || {};
-    const org = body.org || null;
-    const orgId = body.orgId || null;
-    const profile = body.profile || body; // allow full profile in root
+    // Support both JSON body and multipart/form-data:
+    // When multipart, req.body.profile may be a JSON string, or fields may be at root.
+    let body = req.body || {};
+    let parsedProfile = null;
+
+    // If client sent profile as JSON string in 'profile'
+    if (body.profile && typeof body.profile === 'string') {
+      try {
+        parsedProfile = JSON.parse(body.profile);
+      } catch (e) {
+        // ignore parse error; fallback to using direct fields
+        parsedProfile = null;
+      }
+    }
+
+    // If multipart and fields were sent directly, prefer parsedProfile then body
+    const org = (body.org || (parsedProfile && parsedProfile.org)) || null;
+    const orgId = (body.orgId || (parsedProfile && parsedProfile.orgId)) || null;
+    const profileFromBody = parsedProfile || (body.profile && typeof body.profile === 'object' ? body.profile : null) || body || {};
+
     if (!org && !orgId) return res.status(400).json({ error: 'org or orgId is required' });
 
     // Normalize key: prefer orgId as key else canonical org name
     const key = orgId ? String(orgId) : canonicalKeyForOrg(org);
 
-    // Build profile object to persist
-    const profileObj = Object.assign({}, profile, {
-      org: org || profile.org || '',
-      orgId: orgId || profile.orgId || null,
+    // Build profile object to persist (do not include transient photoURL here yet)
+    const profileObj = Object.assign({}, profileFromBody, {
+      org: org || profileFromBody.org || '',
+      orgId: orgId || profileFromBody.orgId || null,
       updatedAt: new Date().toISOString()
     });
 
-    // Persist to local data.json map (non-blocking for firestore path)
+    // Handle uploaded photo (if any)
+    let storedPath = null;
+    let isLocal = false;
+    if (req.file) {
+      try {
+        const ext = path.extname(req.file.originalname) || '';
+        // create object path using key (orgId or canonical name) to namespace by org
+        const safeKey = key ? String(key).replace(/[^a-zA-Z0-9-_]/g, '_') : uuidv4();
+        const objectPath = `officer-photos/${safeKey}/${uuidv4()}${ext || '.png'}`;
+
+        if (supabase) {
+          // upload to supabase; do not upsert to avoid replacing existing unless desired
+          const { data, error } = await supabase.storage.from(supabaseBucket).upload(objectPath, req.file.buffer, { contentType: req.file.mimetype, upsert: false });
+          if (error) {
+            console.warn('Supabase upload error for officer photo:', error);
+            // fallback to local
+          } else {
+            storedPath = data && (data.path || data.Key || data.name) ? (data.path || data.Key || data.name) : objectPath;
+            isLocal = false;
+          }
+        }
+
+        if (!storedPath) {
+          // Supabase not configured or upload failed: store locally
+          const filename = `${uuidv4()}${ext || '.png'}`;
+          const dest = path.join(UPLOADS_DIR, filename);
+          fs.writeFileSync(dest, req.file.buffer);
+          storedPath = filename;
+          isLocal = true;
+        }
+      } catch (err) {
+        console.warn('Error handling uploaded officer photo:', err && err.message ? err.message : err);
+      }
+    } else {
+      // No file uploaded: if client provided a photoURL directly in the profile JSON, we can accept and persist it as-is.
+      if (profileObj.photoURL && typeof profileObj.photoURL === 'string') {
+        // Leave it in profileObj as photoURL (may be public URL). We do not create photoObjectPath.
+      }
+    }
+
+    // Prepare object to persist (store object path and a flag; avoid persisting ephemeral signed URLs)
+    const storedProfile = Object.assign({}, (await readOfficerProfilesFromDB())[key] || {}, profileObj);
+    if (storedPath) {
+      storedProfile.photoObjectPath = storedPath;
+      storedProfile.photoObjectIsLocal = !!isLocal;
+      // Do not persist ephemeral photoURL (signed) in DB; clients should request GET to receive a signed URL.
+      if (storedProfile.photoURL) delete storedProfile.photoURL;
+    }
+
+    // Persist to local data.json map
     try {
       const map = await readOfficerProfilesFromDB();
-      map[key] = Object.assign({}, map[key] || {}, profileObj);
+      map[key] = Object.assign({}, map[key] || {}, storedProfile);
       await writeOfficerProfilesToDB(map);
     } catch (e) {
       console.warn('Failed to write officer profile to local DB:', e);
@@ -685,16 +786,34 @@ app.post('/api/officer-profiles', verifyFirebaseToken, async (req, res) => {
       try {
         // Use orgId as document id when present else canonical org name
         const docId = key;
-        await upsertOfficerProfileToFirestore(docId, profileObj);
+        // For Firestore store, prefer to save photoObjectPath and photoObjectIsLocal (not signed URL)
+        const toSave = Object.assign({}, storedProfile);
+        await upsertOfficerProfileToFirestore(docId, toSave);
       } catch (e) {
         console.warn('Failed to persist officer profile to Firestore:', e);
       }
     }
 
-    // Signal other tabs/clients via localStorage key if running in same browser (server can't set localStorage on clients)
-    // Client code already writes orgsLastUpdated when saving locally; keep that behavior on client.
+    // Build response profile including an accessible photoURL if possible (signed or local)
+    const responseProfile = Object.assign({}, storedProfile);
+    try {
+      if (responseProfile.photoObjectPath) {
+        if (responseProfile.photoObjectIsLocal) {
+          responseProfile.photoURL = `${req.protocol}://${req.get('host')}/uploads/${responseProfile.photoObjectPath}`;
+        } else if (supabase) {
+          const signed = await makeFileUrl(responseProfile.photoObjectPath);
+          if (signed) responseProfile.photoURL = signed;
+        }
+      } else if (profileObj.photoURL) {
+        // client-supplied public URL; echo it back
+        responseProfile.photoURL = profileObj.photoURL;
+      }
+    } catch (e) {
+      console.warn('Failed to attach photoURL to response profile:', e);
+    }
+
     console.log('Officer profile upserted for key=', key);
-    return res.json(map[key] || profileObj);
+    return res.json(responseProfile);
   } catch (err) {
     console.error('POST /api/officer-profiles error:', err);
     return res.status(500).json({ error: 'Server error' });
@@ -718,7 +837,8 @@ app.get('/api/my-profile', verifyFirebaseToken, async (req, res) => {
           const data = doc.data();
           const profile = data.profile || null;
           const role = data.role || null;
-          return res.json({ uid, profile, role });
+          const attached = profile ? await attachProfilePhotoUrl(profile, req) : null;
+          return res.json({ uid, profile: attached, role });
         }
       } catch (e) {
         console.warn('GET /api/my-profile firestore read failed:', e);
@@ -733,7 +853,8 @@ app.get('/api/my-profile', verifyFirebaseToken, async (req, res) => {
         const userRec = db.users[uid];
         const profile = userRec.profile || userRec || null;
         const role = userRec.role || null;
-        return res.json({ uid, profile, role });
+        const attached = profile ? await attachProfilePhotoUrl(profile, req) : null;
+        return res.json({ uid, profile: attached, role });
       }
     } catch (e) {
       // ignore and return empty
@@ -1043,7 +1164,7 @@ app.delete('/api/events/:id', async (req, res) => {
 // Payments endpoints (existing)
 // ----------------------
 
-// GET /api/payments - list all payments (inject signed URLs when possible)
+// GET /api/payments - list all payments (inject signed URLs where possible)
 // Supports optional server-side filtering when query params (eventId, year, block) are provided.
 // If no filter params are provided, returns the legacy array shape for backward compatibility.
 // If filter params are provided, returns an object: { payments: [...], totals: {...}, availableFilters: {...} }
