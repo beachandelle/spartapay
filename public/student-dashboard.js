@@ -6,6 +6,7 @@
 // - Uses server endpoints where available and falls back to localStorage when needed.
 // - NEW: fetches organizations from /api/orgs and events from /api/events?orgId=... (server-preferred).
 // - NEW: reacts to a small localStorage signal ('orgsLastUpdated') so open tabs refresh org list quicker.
+// - NEW: fallback: when /api/orgs returns empty, derive org list from /api/events so students still see orgs.
 
 document.addEventListener("DOMContentLoaded", () => {
   // Use localhost only for local development; on deployed site use same-origin (empty string -> '/api/...')
@@ -500,7 +501,7 @@ document.addEventListener("DOMContentLoaded", () => {
     eventSel.innerHTML = ''; const evLoading = document.createElement('option'); evLoading.value=''; evLoading.disabled=true; evLoading.selected=true; evLoading.textContent='Select event'; eventSel.appendChild(evLoading);
 
     // Fetch orgs from server (fallback to localStorage derived orgs)
-    const orgs = await fetchOrgsFromServer(); // returns array of {id,name,displayName,...}
+    let orgs = await fetchOrgsFromServer(); // returns array of {id,name,displayName,...}
 
     // Deduplicate orgs by canonical name on client as an extra safety net (server should already return deduped)
     const map = new Map(); // canon -> org
@@ -516,15 +517,46 @@ document.addEventListener("DOMContentLoaded", () => {
     });
     let normalizedOrgs = Array.from(map.values());
 
-    // If no orgs found, fallback to deriving orgs from localStorage events
+    // If no orgs found, fallback to deriving orgs from /api/events (server) first, then localStorage
     let finalOrgs = normalizedOrgs;
     if (!finalOrgs || finalOrgs.length === 0) {
       try {
-        const localEvents = JSON.parse(localStorage.getItem("events") || "[]");
-        const set = Array.from(new Set(localEvents.map(e => e.org).filter(Boolean)));
-        finalOrgs = set.map(name => ({ id: name, name, displayName: name }));
+        // Attempt to derive from server events (more authoritative than localStorage)
+        const resp = await fetch(`${SERVER_BASE}/api/events`);
+        if (resp.ok) {
+          const serverEvents = await resp.json();
+          if (Array.isArray(serverEvents) && serverEvents.length > 0) {
+            const names = Array.from(new Set(serverEvents.map(e => (e && e.org) ? e.org : '').filter(Boolean)));
+            finalOrgs = names.map(name => ({ id: name, name, displayName: name }));
+            // Also mirror server events to localStorage for offline fallback
+            try {
+              const local = JSON.parse(localStorage.getItem("events") || "[]");
+              const mirrored = serverEvents.concat(Array.isArray(local) ? local.filter(l => !serverEvents.find(se => se.id && l.id === se.id)) : []);
+              localStorage.setItem("events", JSON.stringify(mirrored));
+            } catch (e) {
+              console.warn('Failed to mirror server events to localStorage (fallback derive):', e);
+            }
+          } else {
+            // If server returned no events, fall back to localStorage-derived orgs (older behavior)
+            const localEvents = JSON.parse(localStorage.getItem("events") || "[]");
+            const set = Array.from(new Set(localEvents.map(e => e.org).filter(Boolean)));
+            finalOrgs = set.map(name => ({ id: name, name, displayName: name }));
+          }
+        } else {
+          // server /api/events failed; fallback to localStorage
+          const localEvents = JSON.parse(localStorage.getItem("events") || "[]");
+          const set = Array.from(new Set(localEvents.map(e => e.org).filter(Boolean)));
+          finalOrgs = set.map(name => ({ id: name, name, displayName: name }));
+        }
       } catch (e) {
-        finalOrgs = [];
+        console.warn('Failed to derive orgs from /api/events fallback:', e);
+        try {
+          const localEvents = JSON.parse(localStorage.getItem("events") || "[]");
+          const set = Array.from(new Set(localEvents.map(e => e.org).filter(Boolean)));
+          finalOrgs = set.map(name => ({ id: name, name, displayName: name }));
+        } catch (e2) {
+          finalOrgs = [];
+        }
       }
     }
 
