@@ -2,8 +2,6 @@
    Adjusted so the main events table header matches the red/white style of the
    payments (verify) table header, and the organization name in the greeting is red.
    Added self-hosted Garet font usage (font-face + variable) and brand text styling.
-   Ensured all textual UI elements (table cells, buttons, inputs, selects, labels, etc.)
-   consistently use the Garet font by applying the --ui-font across relevant selectors.
 */
 
 /* Self-hosted Garet font faces */
@@ -46,18 +44,8 @@
 /* Base */
 *{box-sizing: border-box;}
 html,body { height: 100%; }
-
-/* Ensure the UI font is applied as widely as possible so all visible text uses Garet.
-   Use a broad selector to cover table cells, form controls, buttons, labels, and common inline tags.
-   The !important here is intentional to override any third-party styles that may set a different font.
-*/
-html, body, #app, .container, header, main, footer,
-button, input, select, textarea, label, span, p, h1, h2, h3, h4, h5, h6,
-table, thead, tbody, tfoot, th, td, a, .btn, .dropdown-menu, .filter-chip {
-  font-family: var(--ui-font) !important;
-}
-
 body {
+  font-family: var(--ui-font);
   background: #f7f8fa;
   margin: 0;
   color: #222;
