@@ -162,6 +162,28 @@
     <section id="profileForm" class="card hidden">
       <h3>Officer Profile</h3>
 
+      <!-- PHOTO UPLOAD / PREVIEW -->
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
+        <!-- Preview shown inside profile form (editable) -->
+        <div style="display:flex; flex-direction:column; align-items:center; gap:8px;">
+          <img id="profilePicForm" src="jiecep.png" alt="Officer Photo" width="96" height="96" style="border-radius:50%; object-fit:cover; border:2px solid #eee;">
+          <div style="font-size:13px; color:#666;">Profile Photo</div>
+        </div>
+
+        <div style="flex:1;">
+          <label for="officerPhotoInput" style="font-weight:600; display:block; margin-bottom:6px;">Change / Upload Photo</label>
+          <input type="file" id="officerPhotoInput" accept="image/*" style="width:100%;">
+          <div style="margin-top:8px; color:#666; font-size:13px;">
+            Recommended: JPG, PNG or WEBP. Max file size depends on server configuration.
+          </div>
+          <div style="margin-top:8px; display:flex; gap:8px;">
+            <button id="uploadOfficerPhotoBtn" type="button" class="btn secondary">Upload & Save</button>
+            <button id="removeOfficerPhotoBtn" type="button" class="btn ghost">Remove</button>
+          </div>
+        </div>
+      </div>
+      <!-- END PHOTO -->
+
       <label>Organization Name</label>
       <input type="text" id="profileOrg" placeholder="Organization Name" readonly>
 
@@ -217,4 +239,3 @@
   <script src="officer-dashboard.js" type="module"></script>
 </body>
 </html>
-
