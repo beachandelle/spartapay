@@ -786,19 +786,98 @@ app.get('/api/events', async (req, res) => {
 // GET /api/events/:id - single event
 app.get('/api/events/:id', async (req, res) => {
   try {
+    // Try Firestore first
     if (firestore) {
       const ev = await getEventFirestoreById(req.params.id);
-      if (ev) return res.json(ev);
+      if (ev) {
+        // Attempt to inject fresh signed URL for receiver QR when possible (so clients get usable QR)
+        try {
+          if (ev.receiver && ev.receiver.qrObjectPath) {
+            const signed = await makeFileUrl(ev.receiver.qrObjectPath);
+            if (signed) ev.receiver.qr = signed;
+          } else if (ev.receiver && ev.receiver.qrObjectIsLocal && ev.receiver.qrObjectPath) {
+            ev.receiver.qr = `${req.protocol}://${req.get('host')}/uploads/${ev.receiver.qrObjectPath}`;
+          }
+        } catch (e) { /* ignore signed url failure */ }
+        return res.json(ev);
+      }
       // else fallthrough to local
     }
 
     const db = readDB();
     const ev = (db.events || []).find(x => x.id === req.params.id);
     if (!ev) return res.status(404).json({ error: 'not found' });
+
+    // Attempt to inject fresh signed URL for local-stored event receiver
+    try {
+      if (ev.receiver && ev.receiver.qrObjectPath) {
+        const signed = await makeFileUrl(ev.receiver.qrObjectPath);
+        if (signed) ev.receiver.qr = signed;
+      } else if (ev.receiver && ev.receiver.qrObjectIsLocal && ev.receiver.qrObjectPath) {
+        ev.receiver.qr = `${req.protocol}://${req.get('host')}/uploads/${ev.receiver.qrObjectPath}`;
+      }
+    } catch (e) { /* ignore signed url failure */ }
+
     res.json(ev);
   } catch (err) {
     console.error('GET /api/events/:id error:', err);
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// NEW endpoint: GET /api/events/:id/qr-url - return a fresh signed URL (or local URL) for an event's receiver QR
+app.get('/api/events/:id/qr-url', async (req, res) => {
+  try {
+    const id = req.params.id;
+    let ev = null;
+
+    if (firestore) {
+      ev = await getEventFirestoreById(id);
+    }
+    if (!ev) {
+      const db = readDB();
+      ev = (db.events || []).find(x => x.id === id);
+    }
+
+    if (!ev) return res.status(404).json({ error: 'not found' });
+
+    const receiver = ev.receiver || {};
+    // Prefer explicit local flag
+    if (receiver.qrObjectIsLocal && receiver.qrObjectPath) {
+      const url = `${req.protocol}://${req.get('host')}/uploads/${receiver.qrObjectPath}`;
+      return res.json({ url, expiresIn: 0, local: true });
+    }
+
+    // If object path available, try to create a signed URL (Supabase) or public URL
+    const objectPath = receiver.qrObjectPath || null;
+    if (!objectPath) {
+      // If event stored a data URL in receiver.qr (base64) return that as-is
+      if (receiver.qr && String(receiver.qr).startsWith('data:')) {
+        return res.json({ url: receiver.qr, expiresIn: 0, local: true });
+      }
+      return res.status(404).json({ error: 'no qr object path' });
+    }
+
+    if (!supabase) {
+      return res.status(500).json({ error: 'storage not configured' });
+    }
+
+    const ttl = 60 * 60; // 1 hour
+    // Use makeFileUrl helper for signed URL creation (it tries signed URL then public)
+    try {
+      const url = await makeFileUrl(objectPath, { expires: ttl });
+      if (!url) {
+        console.warn('makeFileUrl returned null for', objectPath);
+        return res.status(500).json({ error: 'could not create signed url' });
+      }
+      return res.json({ url, expiresIn: ttl, local: false });
+    } catch (e) {
+      console.warn('Failed to create signed URL for event QR:', e);
+      return res.status(500).json({ error: 'could not create signed url' });
+    }
+  } catch (err) {
+    console.error('GET /api/events/:id/qr-url error:', err);
+    return res.status(500).json({ error: 'Server error' });
   }
 });
 
